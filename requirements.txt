@@ -5,10 +5,10 @@
 torch==2.6.0
 torchvision==0.21.0
 
-# DiffusionGemmaForBlockDiffusion / TextDiffusionStreamer require a recent
-# transformers build -- if `from transformers import DiffusionGemmaForBlockDiffusion`
-# fails, install from source: pip install -U git+https://github.com/huggingface/transformers
-transformers>=4.46
+# DiffusionGemma was added in transformers v5.11.0 (confirmed via the
+# official model doc, 2026-08-14) -- anything older is missing the class
+# entirely, not just an outdated API.
+transformers>=5.11.0
 accelerate
 datasets
 anthropic
