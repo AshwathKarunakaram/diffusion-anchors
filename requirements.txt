@@ -1,0 +1,15 @@
+# Pod pin: RunPod A100 80GB, driver is CUDA 12.4. Plain `pip install torch`
+# grabs a cu13 build that fails with "NVIDIA driver is too old" -- this exact
+# pin is what worked (see CONTEXT.md "Environment").
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0
+torchvision==0.21.0
+
+# DiffusionGemmaForBlockDiffusion / TextDiffusionStreamer require a recent
+# transformers build -- if `from transformers import DiffusionGemmaForBlockDiffusion`
+# fails, install from source: pip install -U git+https://github.com/huggingface/transformers
+transformers>=4.46
+accelerate
+datasets
+anthropic
+matplotlib
