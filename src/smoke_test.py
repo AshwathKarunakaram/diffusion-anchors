@@ -21,7 +21,7 @@ def main():
                           "Natalia sold clips to 48 friends and then half as "
                           "many again. How many clips did she sell in total?",
                           model.device)
-    rec = CanvasRecorder(tokenizer=processor.tokenizer)
+    rec = CanvasRecorder(tokenizer=processor.tokenizer, verbose=True)  # single example -- OK to watch it live
     out = model.generate(**inputs, max_new_tokens=256, streamer=rec)
 
     gen = processor.tokenizer.decode(

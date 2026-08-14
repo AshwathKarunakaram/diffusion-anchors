@@ -18,6 +18,7 @@ the replay uses too, keeping both runs on the same eager decoder path.
 import json
 import os
 import re
+import time
 
 import torch
 from datasets import load_dataset
@@ -44,15 +45,21 @@ def select_problems():
 
 def main():
     os.makedirs(TRAJ_DIR, exist_ok=True)
+    print("Loading model...")
+    t_load = time.time()
     model, processor = load_model()
+    print(f"Model loaded ({time.time() - t_load:.0f}s).")
     problems = select_problems()
-    print(f"Selected {len(problems)} short GSM8K problems")
+    print(f"Selected {len(problems)} short GSM8K problems. Starting generation.\n")
 
+    t_run_start = time.time()
     for i, prob in enumerate(problems):
         out_path = os.path.join(TRAJ_DIR, f"problem_{i:04d}.json")
         if os.path.exists(out_path):
+            print(f"[{i+1}/{len(problems)}] idx={i:04d} already cached, skipping")
             continue
 
+        t0 = time.time()
         seed = i
         torch.manual_seed(seed)
         if torch.cuda.is_available():
@@ -88,7 +95,11 @@ def main():
                 "steps": steps,
                 "final_text": final_text,
             }, f)
-        print(f"[{i:04d}] steps={len(steps)} final={final_text[-60:]!r}")
+        elapsed = time.time() - t0
+        avg = (time.time() - t_run_start) / (i + 1)
+        eta_min = avg * (len(problems) - i - 1) / 60
+        print(f"[{i+1}/{len(problems)}] idx={i:04d} steps={len(steps)} ({elapsed:.1f}s, "
+              f"ETA {eta_min:.0f}m) final={final_text[-60:]!r}")
 
 
 if __name__ == "__main__":

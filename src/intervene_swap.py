@@ -46,6 +46,7 @@ import glob
 import json
 import os
 import random as pyrandom
+import time
 
 import torch
 
@@ -146,24 +147,33 @@ def run_condition(model, tokenizer, inputs, seed, target_idx, edit_fn, expected_
 
 def main():
     os.makedirs(INTERV_DIR, exist_ok=True)
+    print("Loading model...")
     model, processor = load_model()
     tok = processor.tokenizer
     commit = {int(r["idx"]): r for r in csv.DictReader(open("results/commitment.csv"))}
 
     out_path = os.path.join(INTERV_DIR, "interventions.jsonl")
-    for path in sorted(glob.glob(os.path.join(TRAJ_DIR, "problem_*.json"))):
+    paths = sorted(glob.glob(os.path.join(TRAJ_DIR, "problem_*.json")))
+    print(f"{len(paths)} cached trajectories found. Starting interventions.\n")
+
+    n_eligible = n_skipped_window = n_no_seed = n_no_span = n_no_match = n_rows = n_errors = 0
+    t_start = time.time()
+    for i, path in enumerate(paths):
         traj = json.load(open(path))
         row = commit.get(traj["idx"])
         if not row or not row["commit_lead"] or int(row["commit_lead"]) <= 2:
+            n_skipped_window += 1
             continue  # need a window between commitment and convergence
         c, r = int(row["answer_commit_step"]), int(row["reasoning_converge_step"])
         orig = row["final_answer"]
         seed = traj.get("seed")
         if seed is None:
-            print(f"[{traj['idx']:04d}] no recorded seed in trajectory -- re-run "
+            n_no_seed += 1
+            print(f"[{i+1}/{len(paths)}] idx={traj['idx']:04d} no recorded seed -- re-run "
                   f"generate_trajectories.py to get one, skipping")
             continue
 
+        n_eligible += 1
         inputs = build_inputs(processor, traj["question"], model.device)
 
         for frac in INJECTION_FRACTIONS:
@@ -171,10 +181,17 @@ def main():
             argmax_ids = traj["steps"][s]["token_ids"]
             span = find_answer_token_span(tok, argmax_ids, orig)
             if span is None:
+                n_no_span += 1
+                print(f"[{i+1}/{len(paths)}] idx={traj['idx']:04d} frac={frac}: "
+                      f"answer '{orig}' not found in canvas at step {s}, skipping")
                 continue
             span_len = span[1] - span[0]
             wrong = matched_wrong_answer(tok, orig, span_len)
             if wrong is None:
+                n_no_match += 1
+                print(f"[{i+1}/{len(paths)}] idx={traj['idx']:04d} frac={frac}: "
+                      f"no token-length-matched wrong answer for '{orig}' "
+                      f"(span_len={span_len}), skipping")
                 continue
 
             meta = {"idx": traj["idx"], "inject_step": s, "frac": frac,
@@ -190,12 +207,24 @@ def main():
                 run_condition(model, tok, inputs, seed, s, edit_fn, argmax_ids, label, {**meta, **extra})
                 for label, edit_fn, extra in conditions
             ]
+            n_rows += len(results)
+            n_errors += sum(1 for res in results if res.get("error"))
 
             with open(out_path, "a") as f:
                 for res in results:
                     f.write(json.dumps(res) + "\n")
-            print(f"[{traj['idx']:04d}] frac={frac} step={s} "
-                  f"swap->{results[0]['final_answer']} (orig {orig}, inj {wrong})")
+            elapsed_min = (time.time() - t_start) / 60
+            print(f"[{i+1}/{len(paths)}] idx={traj['idx']:04d} frac={frac} step={s} "
+                  f"({elapsed_min:.1f}m elapsed) swap->{results[0]['final_answer']} "
+                  f"(orig {orig}, inj {wrong})"
+                  + (f"  ** {sum(1 for res in results if res.get('error'))} REPLAY MISMATCH(ES) **"
+                     if any(res.get("error") for res in results) else ""))
+
+    print(f"\nDone. {n_eligible} problems had a usable commit/converge window "
+          f"({n_skipped_window} skipped, {n_no_seed} missing seed), "
+          f"{n_rows} intervention rows written to {out_path} "
+          f"({n_no_span} spans not found, {n_no_match} no length-matched wrong answer, "
+          f"{n_errors} replay mismatches).")
 
 
 if __name__ == "__main__":

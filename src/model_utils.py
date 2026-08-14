@@ -55,11 +55,18 @@ class CanvasRecorder(TextDiffusionStreamer):
         rec = CanvasRecorder(tokenizer=processor.tokenizer)
         out = model.generate(**inputs, streamer=rec, ...)
         rec.draft_history  # list[list[int]] -- token ids per denoising step
+
+    `verbose=False` by default: the parent `TextDiffusionStreamer` prints a
+    live ANSI-redrawn canvas to the console on every step, which is fine for
+    watching one example (smoke_test.py) but unreadable spam across a batch
+    run (50 problems x up to 48 steps). Pass `verbose=True` to get that
+    console output back.
     """
 
-    def __init__(self, tokenizer, **kwargs):
+    def __init__(self, tokenizer, verbose: bool = False, **kwargs):
         super().__init__(tokenizer=tokenizer, **kwargs)
         self.draft_history = []
+        self.verbose = verbose
 
     def put_draft(self, value, *args, **kwargs):
         # `value` is `argmax_canvas.cpu()`, a (batch_size, canvas_length) LongTensor of
@@ -68,8 +75,8 @@ class CanvasRecorder(TextDiffusionStreamer):
         # so drop the batch dim to store a flat list[int] per step.
         ids = value[0].tolist()
         self.draft_history.append(ids)
-        # Keep parent behaviour (console streaming) working:
-        return super().put_draft(value, *args, **kwargs)
+        if self.verbose:
+            return super().put_draft(value, *args, **kwargs)
 
 
 def build_inputs(processor, question: str, device):

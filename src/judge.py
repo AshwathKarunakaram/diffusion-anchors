@@ -26,6 +26,7 @@ itself perturbed the outcome despite reinjecting identical content).
 import json
 import os
 import re
+import time
 
 import anthropic
 
@@ -79,22 +80,48 @@ def main():
     import glob
     trajs = {json.load(open(p))["idx"]: json.load(open(p))
              for p in glob.glob("data/trajectories/problem_*.json")}
+    lines = open("results/interventions/interventions.jsonl").readlines()
+    print(f"{len(lines)} intervention rows to grade.\n")
+
     out = []
-    with open("results/interventions/interventions.jsonl") as f:
-        for line in f:
+    n_ungraded = n_graded = n_errors = 0
+    t_start = time.time()
+    # Written incrementally (not all at the end): a single API hiccup partway
+    # through ~450 calls shouldn't cost you every result graded before it.
+    with open("results/interventions/graded.jsonl", "w") as out_f:
+        for i, line in enumerate(lines):
             rec = json.loads(line)
             if not rec.get("final_answer"):
-                out.append({**rec, "outcome": None}); continue
-            q = trajs[rec["idx"]]["question"]
-            verdict = llm_judge(q, rec["final_text"], rec["final_answer"])
-            eq_ok = last_equation_check(rec["final_text"], rec["final_answer"])
-            rec["judge"] = verdict
-            rec["last_eq_matches_answer"] = eq_ok
-            rec["outcome"] = code_outcome(rec, verdict == "SUPPORTS")
+                rec = {**rec, "outcome": None}
+                n_ungraded += 1
+            else:
+                q = trajs[rec["idx"]]["question"]
+                try:
+                    verdict = llm_judge(q, rec["final_text"], rec["final_answer"])
+                    rec["judge"] = verdict
+                    rec["last_eq_matches_answer"] = last_equation_check(rec["final_text"], rec["final_answer"])
+                    rec["outcome"] = code_outcome(rec, verdict == "SUPPORTS")
+                    n_graded += 1
+                except Exception as e:
+                    rec["judge_error"] = str(e)
+                    rec["outcome"] = None
+                    n_errors += 1
+                    print(f"[{i+1}/{len(lines)}] idx={rec['idx']} frac={rec['frac']} "
+                          f"condition={rec['condition']}: JUDGE ERROR: {e}")
             out.append(rec)
-    with open("results/interventions/graded.jsonl", "w") as f:
-        for r in out:
-            f.write(json.dumps(r) + "\n")
+            out_f.write(json.dumps(rec) + "\n")
+            out_f.flush()
+
+            if rec.get("outcome"):
+                elapsed_min = (time.time() - t_start) / 60
+                eta_min = elapsed_min / (i + 1) * (len(lines) - i - 1)
+                print(f"[{i+1}/{len(lines)}] idx={rec['idx']} frac={rec['frac']} "
+                      f"condition={rec['condition']} orig={rec['orig_answer']} "
+                      f"injected={rec.get('injected_answer')} final={rec['final_answer']} "
+                      f"-> {rec['outcome']} ({elapsed_min:.1f}m elapsed, ETA {eta_min:.0f}m)")
+
+    print(f"\nDone. {n_graded} graded, {n_ungraded} skipped (no final_answer -- "
+          f"replay mismatch or extraction failure), {n_errors} judge API errors.")
 
     from collections import Counter
     by_frac_condition = {}
