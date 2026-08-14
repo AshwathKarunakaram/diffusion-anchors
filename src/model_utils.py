@@ -89,3 +89,31 @@ def build_inputs(processor, question: str, device):
         return_dict=True, return_tensors="pt",
     )
     return {k: v.to(device) for k, v in inputs.items()}
+
+
+def find_answer_token_span(tokenizer, token_ids, answer: str):
+    """Locate the token span (start, end) of the LAST occurrence of `answer`
+    inside `token_ids`. Returns (start, end) [end exclusive], or None.
+
+    Builds character offsets from cumulative FULL-PREFIX decodes
+    (`tokenizer.decode(token_ids[:j])` for each j), not from decoding each
+    token individually and concatenating the strings. The two are not the
+    same thing: many tokenizers encode leading-space/merge information
+    contextually, so a token's standalone decode is not guaranteed to equal
+    its contribution to the joint decode of the full sequence. Decoding
+    each growing prefix as a whole sidesteps that -- it's O(n^2) decode
+    calls, but n is at most `canvas_length` (256), so this is still fast.
+    """
+    prefixes = [""]
+    for j in range(1, len(token_ids) + 1):
+        prefixes.append(tokenizer.decode(token_ids[:j]))
+    full_text = prefixes[-1]
+    k = full_text.rfind(answer)
+    if k < 0:
+        return None
+    start_char, end_char = k, k + len(answer)
+    span = [
+        j for j in range(len(token_ids))
+        if len(prefixes[j]) < end_char and len(prefixes[j + 1]) > start_char
+    ]
+    return (min(span), max(span) + 1) if span else None

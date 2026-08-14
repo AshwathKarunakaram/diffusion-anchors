@@ -103,9 +103,24 @@ value mid-trajectory, let denoising continue, see what comes out. Read
   same-seed runs aren't guaranteed bit-identical. Didn't cause a divergence
   here, but it's the first thing to suspect if a future parity check does
   diverge with no other explanation.
-  **Still open:** `intervene_swap.py` still calls the old, unsound
-  `decoder_input_ids` path — needs rewriting to call
-  `custom_denoise.run_denoising(..., intervention_fn=...)`.
+  **Resolved (2026-08-14):** `intervene_swap.py` rewritten to call
+  `custom_denoise.run_denoising`. It reseeds to match the cached trajectory
+  (`generate_trajectories.py` now records `seed` per problem) and replays,
+  editing the LIVE `current_canvas` at the injection step — not the cached
+  argmax snapshot, which silently substitutes the model's confident guess
+  for the real noise at unaccepted positions if used as the resumption
+  canvas directly. Verifies the replay matches the cached trajectory before
+  editing (`ReplayMismatch` on divergence, given the MoE non-determinism
+  caveat above) rather than intervening on a different run than the one
+  commit/converge steps were measured on. Also fixed two correctness bugs
+  found in the same pass: `matched_wrong_answer` now checks TOKEN length via
+  the tokenizer (digit-string length doesn't guarantee token length under
+  BPE — a mismatch would shift every later canvas position), and
+  `reasoning_converge_step` ([[README]]) now actually excludes the answer
+  span and post-EOS positions from its match-fraction calculation, which
+  its docstring always claimed but the code never did.
+  End-to-end validated on 3 real GSM8K problems, 9 live intervention runs,
+  0 replay mismatches.
 
 ## Repo layout / run order
 

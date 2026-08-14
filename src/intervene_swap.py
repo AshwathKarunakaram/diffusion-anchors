@@ -1,110 +1,156 @@
 """Step 3 (core experiment): soft answer-swap intervention.
 
 For each problem where the answer committed at step c but reasoning converged
-later at step r: take the cached canvas at injection step
-s = c + frac*(r-c), swap the answer tokens to a matched wrong answer, and
-CONTINUE denoising from the edited canvas via decoder_input_ids.
+later at step r: reseed identically to the cached trajectory and REPLAY
+denoising from scratch via `custom_denoise.run_denoising`. At injection step
+s = c + frac*(r-c), edit the LIVE denoising canvas in place (not a cached
+argmax snapshot -- see note below) through `intervention_fn`, then let
+denoising continue naturally. No restart, no temperature reset -- see
+`custom_denoise.py` for why that's sound (it calls the same private
+`_denoising_step` HF's `generate()` uses, so there's no reimplementation to
+drift out of sync).
 
-Conditions per problem/step:
-  swap      -- answer -> matched wrong answer (the treatment)
+Conditions per problem/injection-step:
+  swap      -- answer -> matched wrong value, SAME token length (treatment)
   noop      -- re-inject the SAME answer (edit-disruption control)
-  random    -- perturb a random non-answer, already-stable token (recovery control)
+  random    -- perturb a random already-stable non-answer position (recovery control)
 
-Outcomes recorded: final answer in {injected, original, other}; full final text
-(judged later by judge.py for whether post-injection reasoning supports the
-injected answer).
+WHY current_canvas, NOT the cached argmax snapshot
+`traj["steps"][s]["token_ids"]` is `argmax_canvas` (the streamer's "best
+guess" -- see model_utils.py / custom_denoise.py docstrings), not the actual
+noisy resumption canvas `current_canvas` the model would see next. Splicing
+into the argmax snapshot and resuming FROM it (as the old, broken version of
+this file did) quietly replaces every not-yet-accepted position's real noise
+with the model's own confident guess -- injecting information that wasn't
+there. This version finds the answer span using the cached argmax ids (they
+match `current_canvas` at accepted/stable positions almost always, since
+accepted positions are by construction the lowest-entropy ones -- sample and
+argmax essentially always agree there), but performs the actual edit on the
+LIVE `current_canvas` from the replay.
 
-!! HONESTY BLOCK -- verify before trusting results !!
-(a) decoder_input_ids restarts generate()'s denoising loop on the given canvas.
-    The temperature schedule (t_max -> t_min) will restart unless overridden.
-    Mitigation attempted below: pass a generation config with t_max set to the
-    schedule value at the injection step. VERIFY the config plumbing on-pod by
-    reading generation_diffusion_gemma.py source.
-(b) Un-denoised positions in the cached canvas hold noise/mask token ids.
-    VERIFY generate() accepts a partially-noised canvas as decoder_input_ids
-    without re-noising everything (read the sampler's initialize_canvas /
-    renoise_canvas to see how a provided canvas is treated).
-(c) If (a)/(b) prove wrong, fallback: subclass EntropyBoundSampler /
-    copy the generation loop into a custom function -- ~1-2h of work, and you
-    get exact mid-trajectory continuation plus a place to patch
-    self-conditioning vectors later. This fallback is the mech-interp-grade
-    version anyway.
+REPLAY SAFETY
+Reseeding before a fresh run reproduces the same RNG draws in the same order
+as the cached trajectory (see custom_denoise.py's RNG note) ONLY if the run
+is otherwise identical, and this model's MoE routing has no deterministic
+CUDA kernel (torch.histc -- see custom_denoise.py), so an exact replay is
+likely but not guaranteed. Before applying any edit, `make_intervention`
+verifies the live `argmax_canvas` at the injection step matches the cached
+trajectory's canvas at that step; on a mismatch it raises `ReplayMismatch`
+and the problem/step is skipped and logged, rather than silently
+intervening on a trajectory different from the one commit/converge steps
+were measured on.
 """
 
+import csv
+import glob
 import json
 import os
-import random
+import random as pyrandom
 
 import torch
 
-from config import (ANSWER_DELTAS, INJECTION_FRACTIONS, INTERV_DIR, TRAJ_DIR,
-                    CANVAS_LENGTH)
-from model_utils import load_model, build_inputs
+from config import ANSWER_DELTAS, INJECTION_FRACTIONS, INTERV_DIR, TRAJ_DIR
+from custom_denoise import run_denoising
+from model_utils import build_inputs, find_answer_token_span, load_model
 from parse_commitment import extract_answer
 
 
-def matched_wrong_answer(ans: str) -> str | None:
-    """Same digit count, small perturbation."""
+class ReplayMismatch(Exception):
+    pass
+
+
+def matched_wrong_answer(tokenizer, ans: str, span_len: int) -> str | None:
+    """Same TOKEN length as the original answer's span in the canvas (not
+    just same digit-string length -- BPE doesn't guarantee those coincide,
+    and a length mismatch would shift every later canvas position)."""
     try:
         v = float(ans) if "." in ans else int(ans)
     except ValueError:
         return None
     for d in ANSWER_DELTAS:
         cand = v + d
-        if cand > 0 and len(str(cand)) == len(str(ans)):
-            return str(cand)
+        if cand <= 0:
+            continue
+        cand_str = str(cand)
+        if len(tokenizer.encode(cand_str, add_special_tokens=False)) == span_len:
+            return cand_str
     return None
 
 
-def find_answer_token_span(tokenizer, token_ids, answer: str):
-    """Locate the token span of the final-answer NUMBER in the canvas.
-    Returns (start, end) or None. Strategy: decode with offsets is not
-    available for all tokenizers -> decode cumulative prefixes (slow but
-    correct enough for 256 tokens)."""
-    text = ""
-    positions = []
-    for j, tid in enumerate(token_ids):
-        piece = tokenizer.decode([tid])
-        positions.append((len(text), len(text) + len(piece)))
-        text += piece
-    k = text.rfind(answer)
-    if k < 0:
-        return None
-    span = [j for j, (a, b) in enumerate(positions) if a < k + len(answer) and b > k]
-    return (min(span), max(span) + 1) if span else None
-
-
 def splice_answer(tokenizer, token_ids, span, new_answer: str):
+    """Returns None (caller must handle) instead of silently producing a
+    canvas of the wrong length if `new_answer` doesn't tokenize to exactly
+    `span`'s length in this context."""
     new_ids = tokenizer.encode(new_answer, add_special_tokens=False)
+    if len(new_ids) != span[1] - span[0]:
+        return None
     return token_ids[:span[0]] + new_ids + token_ids[span[1]:]
 
 
-def run_condition(model, processor, traj, canvas_ids, label, meta):
-    inputs = build_inputs(processor, traj["question"], model.device)
-    canvas = torch.tensor([canvas_ids[:CANVAS_LENGTH]], device=model.device)
-    with torch.no_grad():
-        out = model.generate(
-            **inputs,
-            decoder_input_ids=canvas,       # continue from edited canvas
-            max_new_tokens=CANVAS_LENGTH,
-            # TODO(VERIFY a): generation_config with t_max lowered to the
-            # schedule temperature at the injection step.
+def make_intervention(target_idx, edit_fn, expected_argmax_ids):
+    """intervention_fn for run_denoising: no-op until the `target_idx`-th
+    step (0-indexed, matching cached trajectory step indices), then verifies
+    the replay matches the cached trajectory before calling `edit_fn`."""
+    counter = {"i": -1}
+
+    def intervention_fn(state):
+        counter["i"] += 1
+        if counter["i"] != target_idx:
+            return None
+        live_ids = state["argmax_canvas"][0].tolist()
+        if live_ids != expected_argmax_ids:
+            n_diff = sum(a != b for a, b in zip(live_ids, expected_argmax_ids))
+            raise ReplayMismatch(
+                f"replay diverged from cached trajectory at step {target_idx}: "
+                f"{n_diff}/{len(live_ids)} positions differ"
+            )
+        return edit_fn(state)
+
+    return intervention_fn
+
+
+def make_splice_edit(tokenizer, span, new_answer):
+    def edit_fn(state):
+        canvas_ids = state["current_canvas"][0].tolist()
+        new_ids = splice_answer(tokenizer, canvas_ids, span, new_answer)
+        if new_ids is None:
+            return None  # length mismatch in this context -- leave canvas untouched
+        return {"current_canvas": torch.tensor([new_ids], device=state["current_canvas"].device)}
+    return edit_fn
+
+
+def make_random_edit(span):
+    def edit_fn(state):
+        canvas_ids = state["current_canvas"][0].tolist()
+        candidates = [k for k in range(len(canvas_ids)) if not (span[0] <= k < span[1])]
+        j = pyrandom.choice(candidates)
+        new_ids = list(canvas_ids)
+        new_ids[j] = pyrandom.choice(canvas_ids)
+        return {"current_canvas": torch.tensor([new_ids], device=state["current_canvas"].device)}
+    return edit_fn
+
+
+def run_condition(model, tokenizer, inputs, seed, target_idx, edit_fn, expected_argmax_ids, label, meta):
+    intervention_fn = make_intervention(target_idx, edit_fn, expected_argmax_ids)
+    try:
+        final_canvas, _steps = run_denoising(
+            model, inputs["input_ids"], inputs.get("attention_mask"),
+            intervention_fn=intervention_fn, seed=seed, disable_compile=True,
         )
-    final_text = processor.tokenizer.decode(
-        out.sequences[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+    except ReplayMismatch as e:
+        return {**meta, "condition": label, "final_text": None, "final_answer": None, "error": str(e)}
+    final_text = tokenizer.decode(final_canvas[0].tolist(), skip_special_tokens=True)
     final_ans = extract_answer(final_text)
-    return {**meta, "condition": label, "final_text": final_text,
-            "final_answer": final_ans}
+    return {**meta, "condition": label, "final_text": final_text, "final_answer": final_ans}
 
 
 def main():
     os.makedirs(INTERV_DIR, exist_ok=True)
     model, processor = load_model()
     tok = processor.tokenizer
-    import csv, glob
     commit = {int(r["idx"]): r for r in csv.DictReader(open("results/commitment.csv"))}
 
-    results = []
+    out_path = os.path.join(INTERV_DIR, "interventions.jsonl")
     for path in sorted(glob.glob(os.path.join(TRAJ_DIR, "problem_*.json"))):
         traj = json.load(open(path))
         row = commit.get(traj["idx"])
@@ -112,40 +158,44 @@ def main():
             continue  # need a window between commitment and convergence
         c, r = int(row["answer_commit_step"]), int(row["reasoning_converge_step"])
         orig = row["final_answer"]
-        wrong = matched_wrong_answer(orig)
-        if wrong is None:
+        seed = traj.get("seed")
+        if seed is None:
+            print(f"[{traj['idx']:04d}] no recorded seed in trajectory -- re-run "
+                  f"generate_trajectories.py to get one, skipping")
             continue
+
+        inputs = build_inputs(processor, traj["question"], model.device)
 
         for frac in INJECTION_FRACTIONS:
             s = c + int(frac * (r - c))
-            ids = traj["steps"][s]["token_ids"]
-            span = find_answer_token_span(tok, ids, orig)
+            argmax_ids = traj["steps"][s]["token_ids"]
+            span = find_answer_token_span(tok, argmax_ids, orig)
             if span is None:
                 continue
+            span_len = span[1] - span[0]
+            wrong = matched_wrong_answer(tok, orig, span_len)
+            if wrong is None:
+                continue
+
             meta = {"idx": traj["idx"], "inject_step": s, "frac": frac,
-                    "orig_answer": orig, "injected_answer": wrong,
-                    "commit_step": c, "converge_step": r}
+                    "orig_answer": orig, "commit_step": c, "converge_step": r}
 
-            # treatment: swap to wrong answer
-            results.append(run_condition(
-                model, processor, traj, splice_answer(tok, ids, span, wrong),
-                "swap", meta))
-            # control 1: re-inject same answer (edit disruption)
-            results.append(run_condition(
-                model, processor, traj, splice_answer(tok, ids, span, orig),
-                "noop", meta))
-            # control 2: perturb a random stable non-answer token
-            j = random.choice([k for k in range(len(ids))
-                               if not (span[0] <= k < span[1])])
-            rand_ids = list(ids); rand_ids[j] = random.choice(ids)
-            results.append(run_condition(
-                model, processor, traj, rand_ids, "random", meta))
+            conditions = [
+                ("swap", make_splice_edit(tok, span, wrong), {"injected_answer": wrong}),
+                ("noop", make_splice_edit(tok, span, orig), {"injected_answer": orig}),
+                ("random", make_random_edit(span), {"injected_answer": None}),
+            ]
 
-            with open(os.path.join(INTERV_DIR, "interventions.jsonl"), "a") as f:
-                for res in results[-3:]:
+            results = [
+                run_condition(model, tok, inputs, seed, s, edit_fn, argmax_ids, label, {**meta, **extra})
+                for label, edit_fn, extra in conditions
+            ]
+
+            with open(out_path, "a") as f:
+                for res in results:
                     f.write(json.dumps(res) + "\n")
-            print(f"[{traj['idx']:04d}] frac={frac} "
-                  f"swap->{results[-3]['final_answer']} (orig {orig}, inj {wrong})")
+            print(f"[{traj['idx']:04d}] frac={frac} step={s} "
+                  f"swap->{results[0]['final_answer']} (orig {orig}, inj {wrong})")
 
 
 if __name__ == "__main__":

@@ -4,9 +4,15 @@ every intermediate canvas to disk.
 Run inside tmux:  python src/generate_trajectories.py
 
 Output: data/trajectories/problem_{i:04d}.json with
-  question, gold_answer, prompt_token_ids,
+  question, gold_answer, prompt_token_ids, seed,
   steps: [{step, token_ids, text}], final_text
 All downstream analysis runs on these files with NO GPU.
+
+`seed` is recorded (and set right before the `generate()` call) so
+`intervene_swap.py` can reseed identically and replay this exact trajectory
+up to an injection step before editing it live -- see custom_denoise.py and
+intervene_swap.py for why that matters. `disable_compile=True` matches what
+the replay uses too, keeping both runs on the same eager decoder path.
 """
 
 import json
@@ -47,6 +53,11 @@ def main():
         if os.path.exists(out_path):
             continue
 
+        seed = i
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
         inputs = build_inputs(processor, prob["question"], model.device)
         rec = CanvasRecorder(tokenizer=processor.tokenizer)
 
@@ -55,8 +66,7 @@ def main():
                 **inputs,
                 max_new_tokens=CANVAS_LENGTH,
                 streamer=rec,
-                # T=0-style determinism if supported; VERIFY sampler config
-                # options in DiffusionGemmaGenerationConfig on the pod.
+                disable_compile=True,  # matches the eager path intervene_swap.py's replay uses
             )
 
         steps = [
@@ -73,6 +83,7 @@ def main():
                 "question": prob["question"],
                 "gold_answer": prob["gold"],
                 "prompt_len": int(inputs["input_ids"].shape[1]),
+                "seed": seed,
                 "n_steps": len(steps),
                 "steps": steps,
                 "final_text": final_text,

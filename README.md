@@ -79,12 +79,56 @@ window (`tmux new-window`), long GPU jobs in another.
       with the same seed are not guaranteed bit-identical. If a future
       parity check shows a divergence with no other explanation, suspect
       this before suspecting the loop logic.
-      **Still open**: `intervene_swap.py` still calls the old
-      `decoder_input_ids` path — needs rewriting to call
-      `custom_denoise.run_denoising(..., intervention_fn=...)` instead.
+- [x] `intervene_swap.py` rewritten to use `custom_denoise.run_denoising`
+      — resolved (2026-08-14). It reseeds identically to the cached
+      trajectory (`generate_trajectories.py` now records a per-problem
+      `seed`) and replays via `run_denoising`, editing the LIVE
+      `current_canvas` at the injection step rather than the cached
+      argmax snapshot (splicing into the argmax snapshot and resuming from
+      it — the old behavior — silently replaced real noise at not-yet-
+      accepted positions with the model's own confident guess). Before
+      editing, verifies the replay's `argmax_canvas` matches the cached
+      trajectory at that step and raises/logs `ReplayMismatch` rather than
+      intervening on a diverged run if it doesn't (relevant given the
+      MoE/`torch.histc` non-determinism noted above). `matched_wrong_answer`
+      now matches TOKEN length via the tokenizer, not digit-string length,
+      and `splice_answer` refuses (returns `None`) rather than silently
+      producing a canvas of the wrong length.
+      End-to-end validated on 3 real GSM8K problems (9 live intervention
+      runs: 3 injection fractions × swap/noop/random) — 0 replay mismatches.
+- [x] `reasoning_converge_step` (`parse_commitment.py`) actually excludes
+      the answer span and post-EOS canvas positions — resolved (2026-08-14).
+      The docstring always claimed this; the code didn't do it. Left in,
+      the answer span (stable early by definition) inflates the match
+      fraction, and post-EOS filler (which can stay high-entropy far
+      longer than real content) drags it down — both distort the
+      commit-to-converge lag this metric exists to measure. Needs the
+      tokenizer now (`AutoTokenizer.from_pretrained`), not just the cached
+      JSON — still no GPU/model weights.
+- [x] `judge.py` grades every condition, not just `swap` — resolved
+      (2026-08-14), so the noop/random control rates this README's
+      "Analysis endpoints" section calls for can actually be computed.
+      Found and fixed a companion bug while doing this: `intervene_swap.py`
+      was labeling `noop`/`random` rows with the `swap` candidate's
+      `injected_answer` (shared `meta` dict across conditions) — each
+      condition now gets its own accurate label.
 
 ## Analysis endpoints
 
 Headline plot: P(reverted) / P(anchored) / P(copied) vs injection fraction.
 Baselines to add before writeup: AR Gemma answer-prefill rationalization rate;
 noop and random control rates from step 3.
+
+## Live codebase map
+
+Run this from the repo root:
+
+```bash
+python tools/codebase_viz.py
+```
+
+Open `http://127.0.0.1:8765`. It shows the experiment pipeline, the
+DiffusionGemma denoising loop, and a live map of `src/*.py`. It refreshes
+when a source file is saved. On a remote pod, forward the port with:
+
+```bash

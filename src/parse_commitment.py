@@ -7,6 +7,11 @@ Produces results/commitment.csv with one row per problem:
 The headline replication check: answer_commit_step << reasoning_converge_step
 on a substantial fraction of problems (answer-first ordering, cf.
 arXiv 2608.05687 which found this for LLaDA/Dream).
+
+Needs the tokenizer (not the 26B weights) to exclude the answer span from
+the convergence metric -- see `reasoning_converge_step` docstring for why
+that exclusion matters. No GPU needed, but `transformers` must be
+importable now (it wasn't before this fix).
 """
 
 import csv
@@ -15,7 +20,10 @@ import json
 import os
 import re
 
-from config import TRAJ_DIR, REASONING_MATCH_FRAC
+from transformers import AutoTokenizer, GenerationConfig
+
+from config import MODEL_ID, TRAJ_DIR, REASONING_MATCH_FRAC
+from model_utils import find_answer_token_span
 
 ANSWER_RE = re.compile(r"[Tt]he answer is\s*\$?(-?[\d,]+(?:\.\d+)?)")
 
@@ -44,18 +52,43 @@ def commit_step(traj):
     return commit, final
 
 
-def reasoning_converge_step(traj):
-    """First step from which >= REASONING_MATCH_FRAC of final-canvas tokens
-    (excluding the answer line) already match, at every later step."""
+def reasoning_converge_step(traj, tokenizer, eos_ids, final_answer):
+    """First step from which >= REASONING_MATCH_FRAC of REASONING-region
+    tokens (final canvas, excluding the answer span and anything at/after
+    the first EOS token) already match, at every later step.
+
+    Two exclusions, both necessary -- the previous version compared all 256
+    canvas positions with neither:
+
+    1. The answer span. It's stable from `answer_commit_step` onward by
+       definition, so leaving it in inflates the match fraction and can make
+       "convergence" look like it happens at or before commitment -- which
+       defeats the point of measuring the commit-to-converge lag in the
+       first place.
+    2. Everything at/after the first EOS token. Those canvas positions carry
+       no content, so the model has little signal for what belongs there --
+       they can stay high-entropy (and keep getting renoised) far longer
+       than the actual reasoning text. Left in, they can drag the match
+       fraction below threshold until the very last recorded step
+       regardless of when the real reasoning stabilized, biasing
+       `reasoning_converge_step` toward `n_steps - 1` on every problem.
+    """
     final_ids = traj["steps"][-1]["token_ids"]
-    n = len(final_ids)
-    if n == 0:
+    content_end = next((i for i, t in enumerate(final_ids) if t in eos_ids), len(final_ids))
+    if content_end == 0:
         return None
+
+    span = find_answer_token_span(tokenizer, final_ids[:content_end], final_answer) if final_answer else None
+    excluded = set(range(span[0], span[1])) if span else set()
+    positions = [j for j in range(content_end) if j not in excluded]
+    if not positions:
+        return None
+
     for s in range(len(traj["steps"])):
         ok = True
         for later in traj["steps"][s:]:
             ids = later["token_ids"]
-            match = sum(1 for a, b in zip(ids, final_ids) if a == b) / n
+            match = sum(1 for j in positions if ids[j] == final_ids[j]) / len(positions)
             if match < REASONING_MATCH_FRAC:
                 ok = False
                 break
@@ -65,11 +98,14 @@ def reasoning_converge_step(traj):
 
 
 def main():
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    eos_ids = set(GenerationConfig.from_pretrained(MODEL_ID).eos_token_id or [])
+
     rows = []
     for path in sorted(glob.glob(os.path.join(TRAJ_DIR, "problem_*.json"))):
         traj = json.load(open(path))
         c, final = commit_step(traj)
-        r = reasoning_converge_step(traj)
+        r = reasoning_converge_step(traj, tokenizer, eos_ids, final)
         rows.append({
             "idx": traj["idx"],
             "n_steps": traj["n_steps"],
