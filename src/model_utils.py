@@ -1,11 +1,34 @@
 """Model loading and per-step canvas recording.
 
-VERIFY-ON-POD list (API details taken from HF docs for transformers'
-diffusion_gemma; confirm against your installed version before trusting):
-  1. Exact signature of TextDiffusionStreamer.put_draft():
-       python -c "import inspect; from transformers import TextDiffusionStreamer; print(inspect.getsource(TextDiffusionStreamer))"
-  2. What token id fills un-denoised canvas positions (mask/noise token).
-  3. Whether put_draft receives the FULL canvas each step or only changed tokens.
+VERIFIED against the installed transformers/models/diffusion_gemma source
+(generation_diffusion_gemma.py, generation/streamers.py):
+  1. `put_draft(value, ...)` is called once per denoising step with
+     `value = argmax_canvas.cpu()`, a `(batch_size, canvas_length)` LongTensor
+     of token ids -- the argmax over the (temperature-scaled) denoiser
+     logits, NOT decoded text. It is the FULL canvas each step (every
+     position, not just newly-accepted ones). `TextDiffusionStreamer`
+     (and therefore `CanvasRecorder`) only supports batch_size == 1.
+  2. There is NO single mask/noise token id. `EntropyBoundSampler.
+     initialize_canvas` fills un-denoised positions with i.i.d. samples from
+     `torch.randint(0, vocab_size, ...)` -- uniform noise over the full
+     vocabulary, redrawn every step for every not-yet-accepted position via
+     `renoise_canvas`. This is a uniform-noise diffusion model, not an
+     absorbing/[MASK] one.
+  3. `decoder_input_ids`, if passed to `generate(...)`, is consumed verbatim
+     as the starting canvas for the FIRST canvas block's denoising loop only
+     (`_prepare_denoiser_inputs` pops it from `model_kwargs`; later blocks
+     always start from a fresh random canvas). The denoising step loop still
+     runs the FULL `max_denoising_steps` starting at `cur_step ==
+     max_denoising_steps` (i.e. `t_max`), regardless of how "denoised" the
+     injected canvas already is -- the temperature schedule is keyed off the
+     step index, not off canvas noise level. So passing a partially-denoised
+     canvas "continues" denoising in the sense that accept/renoise logic
+     still runs on it (already-good tokens can still be accepted quickly if
+     the model is confident), but the temperature will start high (t_max) as
+     if the canvas were fully noised. To continue "sanely" from an injection
+     point, `max_denoising_steps`/`t_max`/`t_min` likely need to be
+     overridden to match the remaining schedule, or the loop should be
+     copied into a custom function (see README checklist).
 """
 
 import torch
@@ -39,10 +62,11 @@ class CanvasRecorder(TextDiffusionStreamer):
         self.draft_history = []
 
     def put_draft(self, value, *args, **kwargs):
-        try:
-            ids = value.detach().to("cpu").tolist()
-        except AttributeError:
-            ids = list(value)
+        # `value` is `argmax_canvas.cpu()`, a (batch_size, canvas_length) LongTensor of
+        # token ids (the argmax over the denoiser logits, not decoded text). Only
+        # batch_size == 1 is supported here (same constraint as the parent streamer),
+        # so drop the batch dim to store a flat list[int] per step.
+        ids = value[0].tolist()
         self.draft_history.append(ids)
         # Keep parent behaviour (console streaming) working:
         return super().put_draft(value, *args, **kwargs)

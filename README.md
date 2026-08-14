@@ -35,13 +35,42 @@ window (`tmux new-window`), long GPU jobs in another.
 
 ## Verified-assumptions checklist (do not skip)
 
-- [ ] `TextDiffusionStreamer.put_draft` receives the full canvas each step
-- [ ] noise/mask token id for un-denoised positions identified
+- [x] `TextDiffusionStreamer.put_draft` receives the full canvas each step —
+      confirmed in `generation_diffusion_gemma.py`: `put_draft(value=argmax_canvas.cpu())`
+      is called every denoising step with `argmax_canvas`, a full
+      `(batch_size, canvas_length)` LongTensor of **token ids** (argmax over
+      that step's temperature-scaled logits), not decoded text, and not a
+      diff/delta — every position is included every step.
+- [x] noise/mask token id for un-denoised positions identified — there isn't
+      a fixed one. `EntropyBoundSampler.initialize_canvas` draws i.i.d.
+      `torch.randint(0, vocab_size, ...)`, i.e. uniform noise over the full
+      vocab, and `renoise_canvas` redraws fresh uniform-random ids for every
+      not-yet-accepted position each step. This is a uniform-noise diffusion
+      model, not an absorbing/[MASK]-token one — there's no single sentinel
+      id to filter on when reading a canvas.
 - [ ] `decoder_input_ids` continues from a partially-denoised canvas sanely
       (read the sampler: `initialize_canvas` / `renoise_canvas` / `accept_canvas`)
+      — **partially wrong as-is**: `generate(decoder_input_ids=...)` is
+      consumed verbatim as the starting canvas for the denoising loop
+      (`_prepare_denoiser_inputs` pops it from `model_kwargs`), and only for
+      the *first* canvas block — later blocks always start from a fresh
+      random canvas, so `decoder_input_ids` can't be used to inject into a
+      later block directly. Accept/renoise logic (entropy-based) runs
+      correctly on any canvas contents, but `cur_step` still starts at
+      `max_denoising_steps` regardless of how denoised the injected canvas
+      already is, so the temperature schedule starts at `t_max` (as if fully
+      noised) instead of at the value matching the injection point.
 - [ ] temperature schedule on continuation adjusted to injection-step value
+      — not yet done; needs either overriding `max_denoising_steps`/`t_max`/
+      `t_min` per-call to match the remaining schedule, or a custom loop (see
+      next item).
 - [ ] if `decoder_input_ids` semantics are wrong → copy the generation loop
       into a custom function (also unlocks self-conditioning patching later)
+      — **required**: given the above, `intervene_swap.py` should copy
+      `DiffusionGemmaGenerationMixin.generate`'s inner denoising loop
+      (`_denoising_step` et al.) rather than rely on `decoder_input_ids`,
+      so `cur_step`/temperature can be pinned to the injection point and
+      `self_conditioning_logits` can be patched directly.
 
 ## Analysis endpoints
 
