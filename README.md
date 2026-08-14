@@ -48,29 +48,40 @@ window (`tmux new-window`), long GPU jobs in another.
       not-yet-accepted position each step. This is a uniform-noise diffusion
       model, not an absorbing/[MASK]-token one — there's no single sentinel
       id to filter on when reading a canvas.
-- [ ] `decoder_input_ids` continues from a partially-denoised canvas sanely
-      (read the sampler: `initialize_canvas` / `renoise_canvas` / `accept_canvas`)
-      — **partially wrong as-is**: `generate(decoder_input_ids=...)` is
-      consumed verbatim as the starting canvas for the denoising loop
-      (`_prepare_denoiser_inputs` pops it from `model_kwargs`), and only for
-      the *first* canvas block — later blocks always start from a fresh
-      random canvas, so `decoder_input_ids` can't be used to inject into a
-      later block directly. Accept/renoise logic (entropy-based) runs
-      correctly on any canvas contents, but `cur_step` still starts at
-      `max_denoising_steps` regardless of how denoised the injected canvas
-      already is, so the temperature schedule starts at `t_max` (as if fully
-      noised) instead of at the value matching the injection point.
-- [ ] temperature schedule on continuation adjusted to injection-step value
-      — not yet done; needs either overriding `max_denoising_steps`/`t_max`/
-      `t_min` per-call to match the remaining schedule, or a custom loop (see
-      next item).
-- [ ] if `decoder_input_ids` semantics are wrong → copy the generation loop
+- [x] `decoder_input_ids` continues from a partially-denoised canvas sanely
+      — confirmed unsound, same reason as before (verbatim starting canvas,
+      first block only, `cur_step` always resets to `max_denoising_steps`).
+      **Resolved by not using this path at all** — see next item.
+- [x] temperature schedule on continuation adjusted to injection-step value
+      — resolved: `src/custom_denoise.py` re-drives the real per-step
+      function (`_denoising_step`) one step at a time instead of restarting
+      `generate()`, so `cur_step` (and therefore the temperature) just
+      continues naturally across an injection — nothing to reset or override.
+- [x] if `decoder_input_ids` semantics are wrong → copy the generation loop
       into a custom function (also unlocks self-conditioning patching later)
-      — **required**: given the above, `intervene_swap.py` should copy
-      `DiffusionGemmaGenerationMixin.generate`'s inner denoising loop
-      (`_denoising_step` et al.) rather than rely on `decoder_input_ids`,
-      so `cur_step`/temperature can be pinned to the injection point and
-      `self_conditioning_logits` can be patched directly.
+      — **done**: `src/custom_denoise.py`. Design note: it does NOT retype
+      the step math by hand — it calls `DiffusionGemmaGenerationMixin.
+      _denoising_step` directly, once per step, so `intervention_fn=None`
+      structurally IS `generate()`'s math, not a lookalike. Exposes a hook
+      to edit the canvas (o^t) and/or self-conditioning logits (S^t) between
+      any two steps.
+      **Parity validated** (2026-08-14, single GSM8K problem, seed 0,
+      `disable_compile=True`, `CUBLAS_WORKSPACE_CONFIG=:4096:8`,
+      `torch.use_deterministic_algorithms(True, warn_only=True)`): all 9
+      denoising steps' argmax canvases matched HF `generate()` exactly, full
+      decoded text identical through the first EOS token. Only difference
+      was trailing post-EOS filler, which is HF's `_finalize_canvas`
+      pad-replacement — multi-block bookkeeping `custom_denoise.py`
+      intentionally doesn't implement (single-block only, by design).
+      **Caveat for future runs**: this is a 26B MoE model; its expert
+      routing (`transformers/integrations/moe.py:grouped_mm_experts_forward`)
+      uses `torch.histc`, which has no deterministic CUDA kernel. Two runs
+      with the same seed are not guaranteed bit-identical. If a future
+      parity check shows a divergence with no other explanation, suspect
+      this before suspecting the loop logic.
+      **Still open**: `intervene_swap.py` still calls the old
+      `decoder_input_ids` path — needs rewriting to call
+      `custom_denoise.run_denoising(..., intervention_fn=...)` instead.
 
 ## Analysis endpoints
 

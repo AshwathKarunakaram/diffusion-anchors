@@ -80,15 +80,32 @@ value mid-trajectory, let denoising continue, see what comes out. Read
   regardless of how denoised the injected content already is. Passing an
   edited step-30-of-48 canvas via `decoder_input_ids` silently reruns it as
   if it were step 0. **Do not use this path for the intervention experiment.**
-- **Resolution (in progress / next task):** `src/custom_denoise.py` — a
-  from-scratch copy of the library's per-block denoising loop that accepts
-  an explicit starting canvas + starting step + matching temperature, so
-  resumption is exact, plus an edit-callback hook for injecting the
-  answer-swap at a chosen step. Must be validated by running it unedited
-  from step 0 and checking token-for-token equivalence against
-  `model.generate()` on a few problems before trusting any result built on
-  it. This loop is also where self-conditioning-vector patching would hook
-  in later if there's time (stretch goal, not required for the core result).
+- **Resolved (2026-08-14):** `src/custom_denoise.py` exists and is parity-
+  validated. Rather than retyping the library's per-step math, it calls
+  `DiffusionGemmaGenerationMixin._denoising_step` directly, once per step —
+  so `intervention_fn=None` structurally IS `generate()`'s math, not a
+  reimplementation that can drift. Exposes a hook (`intervention_fn`) called
+  between steps that can replace the canvas and/or the self-conditioning
+  logits before the next step, without resetting `cur_step` — this is what
+  makes mid-trajectory injection sound (temperature schedule just continues).
+  Single canvas block only, batch_size==1 only (matches this project's needs
+  exactly; raises `NotImplementedError` outside that scope on purpose).
+  Parity check (single GSM8K problem, seed 0, `disable_compile=True`,
+  `CUBLAS_WORKSPACE_CONFIG=:4096:8`, deterministic algorithms warn_only):
+  all 9 denoising steps matched HF `generate()` exactly, decoded text
+  identical through the first EOS token; only the post-EOS pad filler
+  differed (expected — `_finalize_canvas`'s pad-replacement is multi-block
+  bookkeeping this file intentionally doesn't copy). Also confirms self-
+  conditioning-vector patching (Section 7 stretch goal, [[README]]) is
+  reachable through the same hook if there's time left in the budget.
+  **Caveat**: this is a 26B MoE model — `grouped_mm_experts_forward` routes
+  through `torch.histc`, which has no deterministic CUDA kernel, so two
+  same-seed runs aren't guaranteed bit-identical. Didn't cause a divergence
+  here, but it's the first thing to suspect if a future parity check does
+  diverge with no other explanation.
+  **Still open:** `intervene_swap.py` still calls the old, unsound
+  `decoder_input_ids` path — needs rewriting to call
+  `custom_denoise.run_denoising(..., intervention_fn=...)`.
 
 ## Repo layout / run order
 
