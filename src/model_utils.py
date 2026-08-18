@@ -34,7 +34,7 @@ VERIFIED against the installed transformers/models/diffusion_gemma source
 import torch
 from transformers import AutoProcessor, DiffusionGemmaForBlockDiffusion, TextDiffusionStreamer
 
-from config import MODEL_ID
+from config import MODEL_ID, USER_SUFFIX
 
 
 def load_model(dtype=torch.bfloat16):
@@ -94,11 +94,7 @@ def build_inputs(processor, question: str, device):
     we want to measure."""
     messages = [{
         "role": "user",
-        "content": (
-            f"{question}\n\n"
-            "Think step by step, then state the final answer on the last line "
-            "as: The answer is <number>."
-        ),
+        "content": f"{question}\n\n{USER_SUFFIX}",
     }]
     inputs = processor.apply_chat_template(
         messages, add_generation_prompt=True, tokenize=True,

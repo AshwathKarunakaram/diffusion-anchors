@@ -7,6 +7,12 @@ N_PROBLEMS = 50            # start small; scale after pipeline works
 MAX_GOLD_STEPS = 3         # only GSM8K problems with short gold solutions
 MAX_SOLUTION_CHARS = 400   # solution must fit comfortably in one 256-token canvas
 
+# Keep answer LAST (never "answer first"). Brief so it fits on one 256-token page.
+USER_SUFFIX = (
+    "Solve in a few short steps. No extra commentary. "
+    "Last line exactly: The answer is <number>."
+)
+
 # --- Generation ---
 CANVAS_LENGTH = 256
 MAX_DENOISING_STEPS = 48   # model default; keep explicit so it's logged
