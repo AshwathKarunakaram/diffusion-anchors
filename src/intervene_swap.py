@@ -41,6 +41,7 @@ intervening on a trajectory different from the one commit/converge steps
 were measured on.
 """
 
+import argparse
 import csv
 import glob
 import json
@@ -78,6 +79,20 @@ def matched_wrong_answer(tokenizer, ans: str, span_len: int) -> str | None:
     return None
 
 
+def align_s_to_tokens(logits: torch.Tensor, positions, token_ids):
+    """Point self-conditioning at `positions` at the given token ids.
+
+    Leaves every other canvas position untouched. Rows we touch are set to a
+    sharp peak on the new id (large negative elsewhere, 0 on the target) so
+    the next step's S is 'this is token t', not 'this is still the old answer'.
+    """
+    out = logits.clone()
+    for pos, tid in zip(positions, token_ids):
+        out[0, pos] = -1.0e4
+        out[0, pos, int(tid)] = 0.0
+    return out
+
+
 def splice_answer(tokenizer, token_ids, span, new_answer: str):
     """Returns None (caller must handle) instead of silently producing a
     canvas of the wrong length if `new_answer` doesn't tokenize to exactly
@@ -110,24 +125,45 @@ def make_intervention(target_idx, edit_fn, expected_argmax_ids):
     return intervention_fn
 
 
-def make_splice_edit(tokenizer, span, new_answer):
+def make_splice_edit(tokenizer, span, new_answer, patch_s: bool):
     def edit_fn(state):
         canvas_ids = state["current_canvas"][0].tolist()
         new_ids = splice_answer(tokenizer, canvas_ids, span, new_answer)
         if new_ids is None:
             return None  # length mismatch in this context -- leave canvas untouched
-        return {"current_canvas": torch.tensor([new_ids], device=state["current_canvas"].device)}
+        out = {
+            "current_canvas": torch.tensor(
+                [new_ids], device=state["current_canvas"].device
+            )
+        }
+        if patch_s:
+            spliced = new_ids[span[0]:span[1]]
+            out["self_conditioning_logits"] = align_s_to_tokens(
+                state["self_conditioning_logits"],
+                range(span[0], span[1]),
+                spliced,
+            )
+        return out
     return edit_fn
 
 
-def make_random_edit(span):
+def make_random_edit(span, patch_s: bool):
     def edit_fn(state):
         canvas_ids = state["current_canvas"][0].tolist()
         candidates = [k for k in range(len(canvas_ids)) if not (span[0] <= k < span[1])]
         j = pyrandom.choice(candidates)
         new_ids = list(canvas_ids)
         new_ids[j] = pyrandom.choice(canvas_ids)
-        return {"current_canvas": torch.tensor([new_ids], device=state["current_canvas"].device)}
+        out = {
+            "current_canvas": torch.tensor(
+                [new_ids], device=state["current_canvas"].device
+            )
+        }
+        if patch_s:
+            out["self_conditioning_logits"] = align_s_to_tokens(
+                state["self_conditioning_logits"], [j], [new_ids[j]]
+            )
+        return out
     return edit_fn
 
 
@@ -146,13 +182,25 @@ def run_condition(model, tokenizer, inputs, seed, target_idx, edit_fn, expected_
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--patch-s",
+        action="store_true",
+        help="also overwrite self-conditioning at edited positions (strong poke). "
+             "writes interventions_s.jsonl so the weak canvas-only run is kept.",
+    )
+    args = parser.parse_args()
+    patch_s = args.patch_s
+
     os.makedirs(INTERV_DIR, exist_ok=True)
     print("Loading model...")
     model, processor = load_model()
     tok = processor.tokenizer
     commit = {int(r["idx"]): r for r in csv.DictReader(open("results/commitment.csv"))}
 
-    out_path = os.path.join(INTERV_DIR, "interventions.jsonl")
+    out_name = "interventions_s.jsonl" if patch_s else "interventions.jsonl"
+    out_path = os.path.join(INTERV_DIR, out_name)
+    print(f"patch_s={patch_s}; writing {out_path}")
     paths = sorted(glob.glob(os.path.join(TRAJ_DIR, "problem_*.json")))
     print(f"{len(paths)} cached trajectories found. Starting interventions.\n")
 
@@ -201,12 +249,13 @@ def main():
                 continue
 
             meta = {"idx": traj["idx"], "inject_step": s, "frac": frac,
-                    "orig_answer": orig, "commit_step": c, "converge_step": r}
+                    "orig_answer": orig, "commit_step": c, "converge_step": r,
+                    "s_patched": patch_s}
 
             conditions = [
-                ("swap", make_splice_edit(tok, span, wrong), {"injected_answer": wrong}),
-                ("noop", make_splice_edit(tok, span, orig), {"injected_answer": orig}),
-                ("random", make_random_edit(span), {"injected_answer": None}),
+                ("swap", make_splice_edit(tok, span, wrong, patch_s), {"injected_answer": wrong}),
+                ("noop", make_splice_edit(tok, span, orig, patch_s), {"injected_answer": orig}),
+                ("random", make_random_edit(span, patch_s), {"injected_answer": None}),
             ]
 
             results = [
