@@ -78,6 +78,15 @@ class CanvasRecorder(TextDiffusionStreamer):
         if self.verbose:
             return super().put_draft(value, *args, **kwargs)
 
+    def put(self, value):
+        # Parent also streams the growing decoded text. Same spam as put_draft.
+        if self.verbose:
+            return super().put(value)
+
+    def end(self):
+        if self.verbose:
+            return super().end()
+
 
 def build_inputs(processor, question: str, device):
     """Chat-format a GSM8K question. Keep the prompt NATURAL -- do not use an
