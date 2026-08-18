@@ -50,7 +50,7 @@ import time
 
 import torch
 
-from config import ANSWER_DELTAS, INJECTION_FRACTIONS, INTERV_DIR, TRAJ_DIR
+from config import ANSWER_DELTAS, INJECTION_FRACTIONS, INTERV_DIR, TRAJ_DIR, USER_SUFFIX
 from custom_denoise import run_denoising
 from model_utils import build_inputs, find_answer_token_span, load_model
 from parse_commitment import extract_answer
@@ -161,7 +161,13 @@ def main():
     for i, path in enumerate(paths):
         traj = json.load(open(path))
         row = commit.get(traj["idx"])
-        if not row or not row["commit_lead"] or int(row["commit_lead"]) <= 2:
+        lead = (row or {}).get("commit_lead")
+        # Old 0-9 JSONs have no user_suffix (verbose prompt). Replaying them
+        # with the current brief prompt would be a different generation.
+        if traj.get("user_suffix") != USER_SUFFIX:
+            n_skipped_window += 1
+            continue
+        if not row or lead in ("", None) or int(lead) < 2:
             n_skipped_window += 1
             continue  # need a window between commitment and convergence
         c, r = int(row["answer_commit_step"]), int(row["reasoning_converge_step"])
