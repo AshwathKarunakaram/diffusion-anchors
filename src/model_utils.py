@@ -88,19 +88,20 @@ class CanvasRecorder(TextDiffusionStreamer):
             return super().end()
 
 
-def build_inputs(processor, question: str, device):
-    """Chat-format a GSM8K question. Keep the prompt NATURAL -- do not use an
-    'Answer: __ then reasoning' template, that would manufacture the phenomenon
-    we want to measure."""
-    messages = [{
-        "role": "user",
-        "content": f"{question}\n\n{USER_SUFFIX}",
-    }]
+def build_chat_inputs(processor, user_content: str, device):
+    messages = [{"role": "user", "content": user_content}]
     inputs = processor.apply_chat_template(
         messages, add_generation_prompt=True, tokenize=True,
         return_dict=True, return_tensors="pt",
     )
     return {k: v.to(device) for k, v in inputs.items()}
+
+
+def build_inputs(processor, question: str, device):
+    """Chat-format a GSM8K question. Keep the prompt NATURAL -- do not use an
+    'Answer: __ then reasoning' template, that would manufacture the phenomenon
+    we want to measure."""
+    return build_chat_inputs(processor, f"{question}\n\n{USER_SUFFIX}", device)
 
 
 def find_answer_token_span(tokenizer, token_ids, answer: str):
