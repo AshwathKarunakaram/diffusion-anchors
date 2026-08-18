@@ -123,11 +123,25 @@ def main():
         w.writeheader()
         w.writerows(rows)
 
+    print(f"\n{'idx':>4} {'steps':>5} {'commit':>6} {'conv':>6} {'lead':>5} {'ok':>3}")
+    print("-" * 36)
+    for r in rows:
+        lead = r["commit_lead"]
+        lead_s = str(lead) if lead is not None else "?"
+        print(f"{r['idx']:4d} {r['n_steps']:5d} "
+              f"{r['answer_commit_step'] if r['answer_commit_step'] is not None else '?':>6} "
+              f"{r['reasoning_converge_step'] if r['reasoning_converge_step'] is not None else '?':>6} "
+              f"{lead_s:>5} {'Y' if r['correct'] else 'N':>3}")
+
     leads = [r["commit_lead"] for r in rows if r["commit_lead"] is not None]
     early = sum(1 for l in leads if l > 0)
-    print(f"{len(rows)} problems | answer commits before reasoning converges on "
+    usable = sum(1 for l in leads if l >= 2)
+    print(f"\n{len(rows)} problems | answer commits before reasoning converges on "
           f"{early}/{len(leads)} ({100*early/max(len(leads),1):.0f}%)")
-    print("If this fraction is small, the premise fails on DiffusionGemma -> pivot.")
+    print(f"commit_lead >= 2 (enough room for 0.25/0.5/0.75 injections): "
+          f"{usable}/{len(leads)}")
+    print("If early fraction is small, the premise fails on DiffusionGemma -> pivot.")
+    print("If lead is 0-1 on most rows, easy/short problems are trivial -> bias selection harder.")
 
 
 if __name__ == "__main__":

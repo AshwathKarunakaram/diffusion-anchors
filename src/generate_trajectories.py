@@ -15,6 +15,7 @@ intervene_swap.py for why that matters. `disable_compile=True` matches what
 the replay uses too, keeping both runs on the same eager decoder path.
 """
 
+import argparse
 import json
 import os
 import re
@@ -32,24 +33,33 @@ def gold_answer(sol: str) -> str:
     return m.group(1).replace(",", "") if m else ""
 
 
-def select_problems():
+def select_problems(n_problems: int):
     ds = load_dataset("openai/gsm8k", "main", split="test")
     picked = []
     for ex in ds:
         if len(ex["answer"]) <= MAX_SOLUTION_CHARS:
             picked.append({"question": ex["question"], "gold": gold_answer(ex["answer"])})
-        if len(picked) >= N_PROBLEMS:
+        if len(picked) >= n_problems:
             break
     return picked
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--n-problems",
+        type=int,
+        default=N_PROBLEMS,
+        help=f"how many GSM8K problems to generate (default: {N_PROBLEMS})",
+    )
+    args = parser.parse_args()
+
     os.makedirs(TRAJ_DIR, exist_ok=True)
     print("Loading model...")
     t_load = time.time()
     model, processor = load_model()
     print(f"Model loaded ({time.time() - t_load:.0f}s).")
-    problems = select_problems()
+    problems = select_problems(args.n_problems)
     print(f"Selected {len(problems)} short GSM8K problems. Starting generation.\n")
 
     t_run_start = time.time()
