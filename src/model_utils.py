@@ -130,3 +130,20 @@ def find_answer_token_span(tokenizer, token_ids, answer: str):
         if len(prefixes[j]) < end_char and len(prefixes[j + 1]) > start_char
     ]
     return (min(span), max(span) + 1) if span else None
+
+
+def find_first_token_span(tokenizer, token_ids, needle: str):
+    """Like find_answer_token_span but the FIRST match, not the last."""
+    prefixes = [""]
+    for j in range(1, len(token_ids) + 1):
+        prefixes.append(tokenizer.decode(token_ids[:j]))
+    full_text = prefixes[-1]
+    k = full_text.find(needle)
+    if k < 0:
+        return None
+    start_char, end_char = k, k + len(needle)
+    span = [
+        j for j in range(len(token_ids))
+        if len(prefixes[j]) < end_char and len(prefixes[j + 1]) > start_char
+    ]
+    return (min(span), max(span) + 1) if span else None
