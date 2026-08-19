@@ -128,7 +128,7 @@ DiffusionGemma restore that one token, coherently propagate the rename, or
 globally rewrite the program?
 
 ```bash
-python src/code_repair_pilot.py --n-seeds 5
+python src/code_repair_pilot.py --n-seeds 5 --overwrite
 ```
 
 It generates ordinary short Python functions, retains only executable clean

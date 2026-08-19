@@ -321,12 +321,19 @@ def main():
     parser.add_argument("--n-seeds", type=int, default=5)
     parser.add_argument("--start-seed", type=int, default=0)
     parser.add_argument("--task", choices=[task.name for task in TASKS], default=None)
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace the JSONL summary instead of appending a second pilot run",
+    )
     args = parser.parse_args()
     if CANVAS_LENGTH != 256:
         raise RuntimeError("This pilot is validated only for the 256-token single-canvas setup.")
 
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(os.path.dirname(RESULT_PATH), exist_ok=True)
+    if args.overwrite and os.path.exists(RESULT_PATH):
+        os.remove(RESULT_PATH)
     tasks = [task for task in TASKS if args.task in (None, task.name)]
 
     print("Loading DiffusionGemma for single-canvas code-repair pilot...")
