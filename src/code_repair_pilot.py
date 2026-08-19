@@ -73,6 +73,27 @@ TASKS = (
         expected_name="clamp_all",
         tests=((([], 0, 5), []), (([-2, 3, 10], 0, 5), [0, 3, 5]), (([4], 0, 5), [4])),
     ),
+    CodeTask(
+        name="is_balanced",
+        prompt=(
+            "Write only Python code, with no Markdown fences. Define "
+            "is_balanced(s), returning True exactly when the parentheses, "
+            "square brackets, and curly braces in s are correctly balanced "
+            "and nested. Ignore all other characters."
+        ),
+        expected_name="is_balanced",
+        tests=((("",), True), (("([]){}",), True), (("([)]",), False), (("(a[b]{c})",), True)),
+    ),
+    CodeTask(
+        name="longest_increasing_run",
+        prompt=(
+            "Write only Python code, with no Markdown fences. Define "
+            "longest_increasing_run(xs), returning the length of the longest "
+            "contiguous strictly increasing run in xs. Return 0 for an empty list."
+        ),
+        expected_name="longest_increasing_run",
+        tests=((([],), 0), (([1, 2, 1, 2, 3],), 3), (([3, 2, 1],), 1), (([1, 2, 3],), 3)),
+    ),
 )
 
 # Names are intentionally semantically neutral.  A valid rename should not
@@ -234,7 +255,7 @@ def _safe_exec_child(code: str, function_name: str, tests, queue):
         safe_builtins = {
             "abs": abs, "bool": bool, "enumerate": enumerate, "float": float,
             "int": int, "len": len, "list": list, "max": max, "min": min,
-            "range": range, "sum": sum,
+            "range": range, "set": set, "sum": sum,
         }
         namespace = {"__builtins__": safe_builtins}
         exec(compile(tree, "<generated>", "exec"), namespace, namespace)
@@ -316,6 +337,24 @@ def serializable_steps(steps):
     ]
 
 
+def trace_identifier(tokenizer, steps, old_name: str, new_name: str):
+    """Save readable per-step evidence for whether a rename spreads over time."""
+    trace = []
+    for index, step in enumerate(steps):
+        text = tokenizer.decode(step["argmax_canvas"], skip_special_tokens=True)
+        code = extract_python(text)
+        trace.append(
+            {
+                "step_index": index,
+                "cur_step": step["cur_step"],
+                "old_name_count": len(re.findall(rf"\b{re.escape(old_name)}\b", code)),
+                "new_name_count": len(re.findall(rf"\b{re.escape(new_name)}\b", code)),
+                "code": code,
+            }
+        )
+    return trace
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--n-seeds", type=int, default=5)
@@ -356,12 +395,14 @@ def main():
                 "single_canvas": True,
             }
             cache_path = os.path.join(DATA_DIR, f"{task.name}_seed_{seed:04d}.json")
-            with open(cache_path, "w") as handle:
-                json.dump({**record, "steps": serializable_steps(clean_steps)}, handle)
+            cache = {**record, "clean_steps": serializable_steps(clean_steps)}
 
             if injection is None:
                 record["status"] = "no_eligible_identifier"
                 rows.append(record)
+                cache["status"] = record["status"]
+                with open(cache_path, "w") as handle:
+                    json.dump(cache, handle)
                 print(f"{task.name} seed={seed}: no eligible repeated identifier")
                 continue
 
@@ -385,8 +426,27 @@ def main():
                     **classify(final_text, injection, task),
                     "trajectory_steps": len(intervention_steps),
                 }
+                cache.setdefault("interventions", {})[mode] = {
+                    "steps": serializable_steps(intervention_steps),
+                    "identifier_trace": trace_identifier(
+                        tokenizer,
+                        intervention_steps,
+                        injection["old_name"],
+                        injection["new_name"],
+                    ),
+                }
             record["status"] = "intervened"
             rows.append(record)
+            cache.update(
+                {
+                    "status": record["status"],
+                    "injection": record["injection"],
+                    "replay_matches_clean": record["replay_matches_clean"],
+                    "interventions": cache.get("interventions", {}),
+                }
+            )
+            with open(cache_path, "w") as handle:
+                json.dump(cache, handle)
             outcomes = ", ".join(f"{mode}={record[mode]['outcome']}" for mode in ("canvas", "self_conditioning", "both"))
             print(f"{task.name} seed={seed}: {outcomes}")
 
