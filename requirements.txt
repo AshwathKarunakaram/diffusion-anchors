@@ -1,0 +1,15 @@
+# Pod pin: RunPod A100 80GB, driver is CUDA 12.4. Plain `pip install torch`
+# grabs a cu13 build that fails with "NVIDIA driver is too old" -- this exact
+# pin is what worked (see CONTEXT.md "Environment").
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0
+torchvision==0.21.0
+
+# DiffusionGemma was added in transformers v5.11.0 (confirmed via the
+# official model doc, 2026-08-14) -- anything older is missing the class
+# entirely, not just an outdated API.
+transformers>=5.11.0
+accelerate
+datasets
+anthropic
+matplotlib

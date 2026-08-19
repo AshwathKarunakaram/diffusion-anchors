@@ -21,7 +21,7 @@ def main():
                           "Natalia sold clips to 48 friends and then half as "
                           "many again. How many clips did she sell in total?",
                           model.device)
-    rec = CanvasRecorder(tokenizer=processor.tokenizer)
+    rec = CanvasRecorder(tokenizer=processor.tokenizer, verbose=True)  # single example -- OK to watch it live
     out = model.generate(**inputs, max_new_tokens=256, streamer=rec)
 
     gen = processor.tokenizer.decode(
@@ -29,6 +29,12 @@ def main():
     print("\n--- final output ---\n", gen)
     print(f"\ncaptured {len(rec.draft_history)} intermediate canvases")
     if rec.draft_history:
+        # Each entry in `draft_history` is now a flat list[int] of token ids
+        # (argmax over that step's denoiser logits), one per canvas position --
+        # see CanvasRecorder.put_draft. Un-accepted positions are still i.i.d.
+        # uniform-random token ids (no fixed mask id), so decoding the midpoint
+        # canvas will show a mix of committed text and noise tokens; that's
+        # expected, not a bug.
         mid = rec.draft_history[len(rec.draft_history) // 2]
         print("--- canvas at midpoint ---\n", processor.tokenizer.decode(mid))
 
