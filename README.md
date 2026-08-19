@@ -119,6 +119,25 @@ Headline plot: P(reverted) / P(anchored) / P(copied) vs injection fraction.
 Baselines to add before writeup: AR Gemma answer-prefill rationalization rate;
 noop and random control rates from step 3.
 
+## Code-repair feasibility pilot
+
+`src/code_repair_pilot.py` tests a single-canvas code-generation hypothesis
+before attempting internal activation patching: after an intervention makes an
+otherwise-free local identifier inconsistent with its later uses, does
+DiffusionGemma restore that one token, coherently propagate the rename, or
+globally rewrite the program?
+
+```bash
+python src/code_repair_pilot.py --n-seeds 5
+```
+
+It generates ordinary short Python functions, retains only executable clean
+rollouts with a repeated local identifier, and then replays each trajectory
+with canvas-only, self-conditioning-only, and joint definition-site renames.
+All outputs are restricted to one 256-token canvas. Results go to
+`results/code_repair_pilot.jsonl`; raw trajectories go to
+`data/code_repair_pilot/`.
+
 ## Live codebase map
 
 Run this from the repo root:
