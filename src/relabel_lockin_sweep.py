@@ -82,6 +82,7 @@ def main():
             f"{name}: {stats['correct_final']}/{stats['attempts']} correct; "
             f"possible correctors={stats['possible_correctors']}; "
             f"possible locked wrong={stats['possible_locked_wrong']}; "
+            f"possible lost correct={stats['possible_lost_correct']}; "
             f"mean steps={stats['mean_steps']:.1f}"
         )
     print(f"\nRewrote {RESULT_PATH} and {SUMMARY_PATH} from {len(rows)} cached trajectories")

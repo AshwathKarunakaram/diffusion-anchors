@@ -123,6 +123,7 @@ def main():
             f"{name}: {stats['correct_final']}/{stats['attempts']} correct; "
             f"possible correctors={stats['possible_correctors']}; "
             f"possible locked wrong={stats['possible_locked_wrong']}; "
+            f"possible lost correct={stats['possible_lost_correct']}; "
             f"mean steps={stats['mean_steps']:.1f}"
         )
     print(f"\nWrote {len(rows)} rows to {RESULT_PATH}")

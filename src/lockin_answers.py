@@ -58,6 +58,10 @@ def trajectory_label(per_step_answers, final_answer, gold):
         return "always_or_early_correct"
     if final_answer is None:
         return "no_final_integer"
+    # The gold answer was visible mid-denoising and then overwritten: the
+    # purest lock-in candidate, kept separate from never-found-the-answer runs.
+    if gold in visible[:-1]:
+        return "possible_lost_correct"
     # A wrong answer observed at least twice is more likely to be a genuine
     # stable draft than a single noisy early canvas.
     if visible.count(final_answer) >= 2:
@@ -76,6 +80,7 @@ def summarize(rows):
                 "correct_final": 0,
                 "possible_correctors": 0,
                 "possible_locked_wrong": 0,
+                "possible_lost_correct": 0,
                 "labels": {},
                 "step_counts": [],
             },
@@ -84,6 +89,7 @@ def summarize(rows):
         bucket["correct_final"] += int(row["final_answer"] == row["gold_answer"])
         bucket["possible_correctors"] += int(row["trajectory_label"] == "possible_corrector")
         bucket["possible_locked_wrong"] += int(row["trajectory_label"] == "possible_locked_wrong")
+        bucket["possible_lost_correct"] += int(row["trajectory_label"] == "possible_lost_correct")
         label = row["trajectory_label"]
         bucket["labels"][label] = bucket["labels"].get(label, 0) + 1
         bucket["step_counts"].append(row["n_steps"])
