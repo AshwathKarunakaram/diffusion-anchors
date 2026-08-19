@@ -83,4 +83,43 @@ PROMPTS = (
         "How many 5-card hands from a standard 52-card deck contain exactly two aces?",
         103776,
     ),
+    # --- Arithmetic-finale family -------------------------------------------
+    # The first sweep showed the mixed correct/locked-wrong zone is prompts
+    # whose derivation is easy but whose final answer needs a multi-digit
+    # computation (two_aces_hand: 6 * 17,296).  These clones target that zone.
+    LockinPrompt(
+        "one_ace_hand",
+        "How many 5-card hands from a standard 52-card deck contain exactly one ace?",
+        778320,  # C(4,1) * C(48,4) = 4 * 194,580
+    ),
+    LockinPrompt(
+        "two_hearts_hand",
+        "How many 5-card hands from a standard 52-card deck contain exactly two hearts?",
+        712842,  # C(13,2) * C(39,3) = 78 * 9,139
+    ),
+    LockinPrompt(
+        "distinct_letter_string",
+        "How many 5-letter strings over the 26-letter English alphabet have all letters distinct?",
+        7893600,  # 26 * 25 * 24 * 23 * 22
+    ),
+    LockinPrompt(
+        "committee_boys_girls",
+        "A committee is formed by choosing 4 of 15 boys and 3 of 12 girls. How many committees are possible?",
+        300300,  # C(15,4) * C(12,3) = 1,365 * 220
+    ),
+    LockinPrompt(
+        "binary_choose_eight",
+        "How many binary strings of length 20 contain exactly eight 1s?",
+        125970,  # C(20,8)
+    ),
+    LockinPrompt(
+        "sum_to_999",
+        "What is the sum of all integers from 1 through 999 inclusive?",
+        499500,  # 999 * 1000 / 2
+    ),
+    LockinPrompt(
+        "handshakes_150",
+        "At a party of 150 people, every pair of people shakes hands exactly once. How many handshakes occur?",
+        11175,  # C(150,2) = 150 * 149 / 2
+    ),
 )

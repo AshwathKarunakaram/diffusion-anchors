@@ -135,6 +135,27 @@ screen must produce both correction and lock-in trajectories for at least some
 prompt families. Results go to `results/lockin_sweep_summary.json`; full
 trajectories go to `data/lockin_sweep/`.
 
+### Round 2: arithmetic-finale prompts + deeper seeds
+
+Round 1 found the mixed correct/locked-wrong zone is "easy derivation, hard
+final arithmetic" (`two_aces_hand`: 6/10 correct, 4/10 locked wrong; repeated
+wrong attractor 96,276). Round 2 runs the seven new arithmetic-finale clones,
+then deepens the two mixed prompts to 40 seeds. `--prompt` is repeatable and
+rows append to the same JSONL, so round 1 results are kept (no `--overwrite`):
+
+```bash
+python src/generate_lockin_sweep.py --n-seeds 10 \
+  --prompt one_ace_hand --prompt two_hearts_hand --prompt distinct_letter_string \
+  --prompt committee_boys_girls --prompt binary_choose_eight \
+  --prompt sum_to_999 --prompt handshakes_150
+python src/generate_lockin_sweep.py --n-seeds 30 --start-seed 10 \
+  --prompt two_aces_hand --prompt increasing_three_digits
+```
+
+Note: each run rewrites `lockin_sweep_summary.json` with only its own rows;
+the JSONL is the authoritative record. Copy `results/` and
+`data/lockin_sweep/` off the Colab disk after every run.
+
 ## Live codebase map
 
 Run this from the repo root:

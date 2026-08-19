@@ -108,7 +108,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--n-seeds", type=int, default=10)
     parser.add_argument("--start-seed", type=int, default=0)
-    parser.add_argument("--prompt", choices=[prompt.name for prompt in PROMPTS], default=None)
+    parser.add_argument(
+        "--prompt",
+        action="append",
+        choices=[prompt.name for prompt in PROMPTS],
+        default=None,
+        help="restrict to these prompts (repeatable); default is all prompts",
+    )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -124,7 +130,7 @@ def main():
             if os.path.exists(path):
                 os.remove(path)
 
-    prompts = [prompt for prompt in PROMPTS if args.prompt in (None, prompt.name)]
+    prompts = [prompt for prompt in PROMPTS if args.prompt is None or prompt.name in args.prompt]
     print("Loading DiffusionGemma for answer-first lock-in sweep...")
     model, processor = load_model()
     tokenizer = processor.tokenizer
