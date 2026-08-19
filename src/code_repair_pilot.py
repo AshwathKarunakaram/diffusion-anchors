@@ -94,6 +94,46 @@ TASKS = (
         expected_name="longest_increasing_run",
         tests=((([],), 0), (([1, 2, 1, 2, 3],), 3), (([3, 2, 1],), 1), (([1, 2, 3],), 3)),
     ),
+    CodeTask(
+        name="eval_rpn",
+        prompt=(
+            "Write only Python code, with no Markdown fences. Define "
+            "eval_rpn(tokens), which evaluates an expression in reverse Polish "
+            "notation. Tokens are integer strings or one of +, -, *, /. Division "
+            "truncates toward zero."
+        ),
+        expected_name="eval_rpn",
+        tests=(
+            ((["2", "1", "+", "3", "*"],), 9),
+            ((["4", "13", "5", "/", "+"],), 6),
+            ((["3", "-4", "+"],), -1),
+        ),
+    ),
+    CodeTask(
+        name="merge_intervals",
+        prompt=(
+            "Write only Python code, with no Markdown fences. Define "
+            "merge_intervals(intervals), returning merged inclusive integer "
+            "intervals sorted by start. Each input interval is [start, end]; "
+            "intervals that overlap or touch must be merged."
+        ),
+        expected_name="merge_intervals",
+        tests=(
+            (([],), []),
+            (([[1, 3], [2, 4], [6, 7], [7, 8]],), [[1, 4], [6, 8]]),
+            (([[5, 6], [1, 2]],), [[1, 2], [5, 6]]),
+        ),
+    ),
+    CodeTask(
+        name="longest_unique_substring",
+        prompt=(
+            "Write only Python code, with no Markdown fences. Define "
+            "longest_unique_substring(s), returning the length of the longest "
+            "substring of s containing no repeated characters."
+        ),
+        expected_name="longest_unique_substring",
+        tests=((("",), 0), (("abcabcbb",), 3), (("bbbbb",), 1), (("pwwkew",), 3)),
+    ),
 )
 
 # Names are intentionally semantically neutral.  A valid rename should not
@@ -254,8 +294,8 @@ def _safe_exec_child(code: str, function_name: str, tests, queue):
             return
         safe_builtins = {
             "abs": abs, "bool": bool, "enumerate": enumerate, "float": float,
-            "int": int, "len": len, "list": list, "max": max, "min": min,
-            "range": range, "set": set, "sum": sum,
+            "dict": dict, "int": int, "len": len, "list": list, "max": max,
+            "min": min, "range": range, "set": set, "sorted": sorted, "sum": sum,
         }
         namespace = {"__builtins__": safe_builtins}
         exec(compile(tree, "<generated>", "exec"), namespace, namespace)
