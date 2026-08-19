@@ -82,7 +82,14 @@ IDENTIFIER_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
 
 
 def extract_python(text: str) -> str:
-    """Remove a common Markdown fence without trying to repair model code."""
+    """Remove generation wrappers without repairing model-authored code.
+
+    DiffusionGemma's chat decoding can expose a bare ``thought`` channel marker
+    immediately before otherwise ordinary code.  It is not part of the
+    assistant's Python response, and executing it causes a spurious
+    ``NameError``.  Our prompts require a top-level function, so discard only
+    material before the first top-level ``def`` after handling Markdown fences.
+    """
     text = text.strip()
     if text.startswith("```"):
         lines = text.splitlines()
@@ -91,6 +98,9 @@ def extract_python(text: str) -> str:
         if lines and lines[-1].strip().startswith("```"):
             lines = lines[:-1]
         text = "\n".join(lines)
+    function_start = re.search(r"(?m)^def\s+", text)
+    if function_start is not None:
+        text = text[function_start.start():]
     return text.strip()
 
 
