@@ -13,10 +13,10 @@ Run on the A100/Colab runtime:
 import argparse
 import json
 import os
-import re
 
 from config import CANVAS_LENGTH
 from custom_denoise import run_denoising
+from lockin_answers import extract_answer, summarize, trajectory_label
 from lockin_prompts import PROMPTS
 from model_utils import build_chat_inputs, load_model
 
@@ -24,39 +24,6 @@ from model_utils import build_chat_inputs, load_model
 DATA_DIR = "data/lockin_sweep"
 RESULT_PATH = "results/lockin_sweep.jsonl"
 SUMMARY_PATH = "results/lockin_sweep_summary.json"
-
-ANSWER_PATTERNS = (
-    re.compile(r"(?:the\s+)?answer\s+is\s*[:=]?\s*\**\s*(-?\d[\d,]*)", re.I),
-    re.compile(r"^.*?(?:there\s+are|there\s+is)\s+\**\s*(-?\d[\d,]*)", re.I | re.S),
-)
-FIRST_INT = re.compile(r"-?\d[\d,]*")
-
-
-def extract_answer(text: str):
-    """Read the answer-first integer, returning None when no integer is visible."""
-    text = text.replace("thought\n", "", 1).strip()
-    for pattern in ANSWER_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            return int(match.group(1).replace(",", ""))
-    match = FIRST_INT.search(text)
-    return int(match.group().replace(",", "")) if match else None
-
-
-def trajectory_label(per_step_answers, final_answer, gold):
-    """A triage label, not a proof of the model's reasoning algorithm."""
-    visible = [answer for answer in per_step_answers if answer is not None]
-    if final_answer == gold:
-        if any(answer != gold for answer in visible[:-1]):
-            return "possible_corrector"
-        return "always_or_early_correct"
-    if final_answer is None:
-        return "no_final_integer"
-    # A wrong answer observed at least twice is more likely to be a genuine
-    # stable draft than a single noisy early canvas.
-    if visible.count(final_answer) >= 2:
-        return "possible_locked_wrong"
-    return "wrong_unstable_or_other"
 
 
 def serializable_steps(tokenizer, steps):
@@ -74,34 +41,6 @@ def serializable_steps(tokenizer, steps):
             }
         )
     return result
-
-
-def summarize(rows):
-    summary = {}
-    for row in rows:
-        bucket = summary.setdefault(
-            row["prompt_name"],
-            {
-                "gold_answer": row["gold_answer"],
-                "attempts": 0,
-                "correct_final": 0,
-                "possible_correctors": 0,
-                "possible_locked_wrong": 0,
-                "labels": {},
-                "step_counts": [],
-            },
-        )
-        bucket["attempts"] += 1
-        bucket["correct_final"] += int(row["final_answer"] == row["gold_answer"])
-        bucket["possible_correctors"] += int(row["trajectory_label"] == "possible_corrector")
-        bucket["possible_locked_wrong"] += int(row["trajectory_label"] == "possible_locked_wrong")
-        label = row["trajectory_label"]
-        bucket["labels"][label] = bucket["labels"].get(label, 0) + 1
-        bucket["step_counts"].append(row["n_steps"])
-    for bucket in summary.values():
-        bucket["correct_final_rate"] = bucket["correct_final"] / bucket["attempts"]
-        bucket["mean_steps"] = sum(bucket["step_counts"]) / bucket["attempts"]
-    return summary
 
 
 def main():

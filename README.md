@@ -156,6 +156,21 @@ Note: each run rewrites `lockin_sweep_summary.json` with only its own rows;
 the JSONL is the authoritative record. Copy `results/` and
 `data/lockin_sweep/` off the Colab disk after every run.
 
+### Relabeling after extractor fixes
+
+Round-2 inspection found the answer extractor read integers from the
+reasoning ("There are 4 aces...") and from restated questions ("from 1
+through 999"). The fixed extractor (`src/lockin_answers.py`) only reads the
+answer-first segment before the reasoning marker. Labels are rebuilt from
+the cached trajectories without any GPU work — run after all sweeps finish:
+
+```bash
+python src/relabel_lockin_sweep.py
+```
+
+This updates the cache files in place and regenerates the full JSONL and
+summary from every cached trajectory (both rounds plus the deep seeds).
+
 ## Live codebase map
 
 Run this from the repo root:
