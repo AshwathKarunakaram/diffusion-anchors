@@ -138,6 +138,21 @@ All outputs are restricted to one 256-token canvas. Results go to
 `results/code_repair_pilot.jsonl`; raw trajectories go to
 `data/code_repair_pilot/`.
 
+## Code-failure screen
+
+Before training a linear monitor of unfinished DiffusionGemma code, establish
+that the same prompt naturally produces both passing and failing single-canvas
+attempts:
+
+```bash
+python src/code_failure_screen.py --n-seeds 6 --overwrite
+```
+
+The script runs fixed unit tests for twelve short coding tasks, caches every
+denoising trajectory in `data/code_failure_screen/`, and writes a per-task
+pass-rate summary to `results/code_failure_screen_summary.json`. Only tasks
+with a mixed pass/fail rate should proceed to the probe stage.
+
 ## Live codebase map
 
 Run this from the repo root:

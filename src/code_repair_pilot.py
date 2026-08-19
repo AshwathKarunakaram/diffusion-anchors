@@ -295,7 +295,8 @@ def _safe_exec_child(code: str, function_name: str, tests, queue):
         safe_builtins = {
             "abs": abs, "bool": bool, "enumerate": enumerate, "float": float,
             "dict": dict, "int": int, "len": len, "list": list, "max": max,
-            "min": min, "range": range, "set": set, "sorted": sorted, "sum": sum,
+            "min": min, "range": range, "reversed": reversed, "set": set,
+            "sorted": sorted, "sum": sum, "tuple": tuple, "zip": zip,
         }
         namespace = {"__builtins__": safe_builtins}
         exec(compile(tree, "<generated>", "exec"), namespace, namespace)
