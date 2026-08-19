@@ -119,6 +119,22 @@ Headline plot: P(reverted) / P(anchored) / P(copied) vs injection fraction.
 Baselines to add before writeup: AR Gemma answer-prefill rationalization rate;
 noop and random control rates from step 3.
 
+## Answer-lock-in replication screen
+
+`src/generate_lockin_sweep.py` tests whether answer-first quantitative prompts
+produce both natural retroactive corrections and stable wrong answers in a
+single canvas. It caches every draft and retains gold answers, so behavioral
+labels can be checked without an LLM judge.
+
+```bash
+python src/generate_lockin_sweep.py --n-seeds 10 --overwrite
+```
+
+The gate for a later lens/patching study is not merely wrong answers: the
+screen must produce both correction and lock-in trajectories for at least some
+prompt families. Results go to `results/lockin_sweep_summary.json`; full
+trajectories go to `data/lockin_sweep/`.
+
 ## Live codebase map
 
 Run this from the repo root:
