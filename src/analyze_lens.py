@@ -21,6 +21,7 @@ Run:  python src/analyze_lens.py
 import glob
 import json
 import os
+import re
 
 import matplotlib
 
@@ -119,19 +120,36 @@ def locked_margin(runs):
     return curves
 
 
+TOKEN_NAME = re.compile(r"<[^>]*>")
+
+
+def contains_gold(text: str, gold: int) -> bool:
+    """True when gold appears as a standalone number in the decoded window.
+
+    Special-token names are stripped first ("<unused5384>" must not match a
+    gold of 84), and the needle may not butt against another digit or a
+    thousands comma ("884", "5384", and "1,84x" are not sightings). Unicode
+    \\d also rejects non-ASCII digit glyphs bleeding into the number.
+    """
+    cleaned = TOKEN_NAME.sub(" ", text)
+    for needle in (f"{gold:,}", str(gold)):
+        if re.search(rf"(?<![\d,]){re.escape(needle)}(?!\d)", cleaned):
+            return True
+    return False
+
+
 def gold_visible_events(runs, tokenizer):
     """Earliest (step_fraction, layer) whose decoded window contains gold."""
     events = []
     for run in runs:
         arrays, meta = run["arrays"], run["meta"]
         gold = meta["gold_answer"]
-        needles = (f"{gold:,}", str(gold))
         top1 = arrays["top1_win"]  # (L, S, W)
         found = None
         for step_index in range(top1.shape[1]):
             for layer_index in range(top1.shape[0]):
                 text = tokenizer.decode(top1[layer_index, step_index].tolist())
-                if any(needle in text for needle in needles):
+                if contains_gold(text, gold):
                     found = {
                         "step_index": step_index,
                         "step_fraction": float((step_index + 0.5) / top1.shape[1]),
