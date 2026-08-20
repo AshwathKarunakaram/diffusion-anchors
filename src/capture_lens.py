@@ -133,6 +133,7 @@ def answer_span_and_targets(tokenizer, final_ids, gold_answer):
     }
 
 
+@torch.no_grad()
 def lens_reduce(model, captures, steps, final_ids, targets, device):
     """Project every (layer, step) hidden through norm + lm_head; reduce."""
     norm = model.model.decoder.norm
