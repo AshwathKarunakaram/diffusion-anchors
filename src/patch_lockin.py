@@ -94,6 +94,11 @@ def main():
     parser.add_argument("--regions", type=str, default="answer,all")
     parser.add_argument("--max-per-label", type=int, default=12)
     parser.add_argument("--skip-shuffle", action="store_true")
+    parser.add_argument("--n-donors", type=int, default=1,
+                        help="how many corrector donors to use (donor-idiosyncrasy check)")
+    parser.add_argument("--locked-donor", action="store_true",
+                        help="also transplant S from OTHER locked runs: the "
+                             "coherent-but-wrong control the shuffle cannot provide")
     args = parser.parse_args()
     prompt_names = args.prompt or ["two_aces_hand"]
     step_ks = [int(v) for v in args.steps.split(",")]
@@ -109,26 +114,36 @@ def main():
     for prompt_name in prompt_names:
         prompt = prompt_by_name[prompt_name]
         rows = select_runs(prompt_name, args.max_per_label)
-        donors = [row for row in rows if row["trajectory_label"] in CORRECT_LABELS]
+        correctors = [row for row in rows if row["trajectory_label"] in CORRECT_LABELS]
         recipients = [row for row in rows if row["trajectory_label"] in LOCKED_LABELS]
-        if not donors or not recipients:
+        if not correctors or not recipients:
             print(f"{prompt_name}: need both donors and recipients, skipping")
             continue
-        donor = donors[0]
-        inputs = build_chat_inputs(processor, prompt.prompt, model.device)
-        print(f"{prompt_name}: donor seed={donor['seed']}, "
-              f"{len(recipients)} recipients, steps={step_ks}, regions={regions}")
 
-        # Capture donor S at every requested step in one replay per step.
+        # Donor pool: N correctors, plus (for the coherent-but-wrong control)
+        # two locked runs so every recipient can be given a locked donor that
+        # is not itself.
+        donor_specs = [(row["seed"], "donor") for row in correctors[: args.n_donors]]
+        locked_pool = [row["seed"] for row in recipients[:2]]
+        if args.locked_donor:
+            donor_specs += [(seed, "locked_donor") for seed in locked_pool]
+
+        inputs = build_chat_inputs(processor, prompt.prompt, model.device)
+        print(f"{prompt_name}: donors={donor_specs}, {len(recipients)} recipients, "
+              f"steps={step_ks}, regions={regions}")
+
+        # Capture every donor's S at every requested step (one replay each).
         donor_S = {}
-        for step_k in step_ks:
-            store = {}
-            _, donor_final, donor_steps = replay(
-                model, tokenizer, inputs, donor["seed"], capture_s_at(step_k, store))
-            if "S" not in store:
-                print(f"  donor run has only {donor_steps} steps; step {step_k} skipped")
-                continue
-            donor_S[step_k] = store["S"]
+        for donor_seed, kind in donor_specs:
+            for step_k in step_ks:
+                store = {}
+                _, _, donor_steps = replay(
+                    model, tokenizer, inputs, donor_seed, capture_s_at(step_k, store))
+                if "S" not in store:
+                    print(f"  donor seed={donor_seed} has only {donor_steps} steps; "
+                          f"step {step_k} skipped")
+                    continue
+                donor_S[(donor_seed, step_k)] = (store["S"], kind)
         if not donor_S:
             continue
 
@@ -145,14 +160,16 @@ def main():
                 start, end = targets["window"]
                 window = (start, end)
 
-            for step_k, S in donor_S.items():
-                if step_k >= n_steps:
-                    continue
+            for (donor_seed, step_k), (S, kind) in donor_S.items():
+                if step_k >= n_steps or donor_seed == seed:
+                    continue  # a run cannot donate to itself
                 for region in regions:
                     region_window = window if region == "answer" else None
                     if region == "answer" and window is None:
                         continue
-                    conditions = ["donor"] if args.skip_shuffle else ["donor", "shuffle"]
+                    conditions = [kind]
+                    if kind == "donor" and not args.skip_shuffle:
+                        conditions.append("shuffle")
                     for condition in conditions:
                         patch = make_patch(step_k, S, region_window,
                                            shuffle=(condition == "shuffle"), seed=seed)
@@ -160,7 +177,7 @@ def main():
                             model, tokenizer, inputs, seed, patch)
                         row = {
                             "prompt_name": prompt_name,
-                            "donor_seed": donor["seed"],
+                            "donor_seed": donor_seed,
                             "recipient_seed": seed,
                             "step_k": step_k,
                             "region": region,
@@ -173,21 +190,26 @@ def main():
                             "n_steps": patched_steps,
                         }
                         results.append(row)
-                        print(f"  seed={seed} k={step_k} {region}/{condition}: "
-                              f"{noop_answer} -> {patched_answer} "
+                        print(f"  seed={seed} <- d{donor_seed} k={step_k} "
+                              f"{region}/{condition}: {noop_answer} -> {patched_answer} "
                               f"{'FLIPPED' if row['flipped_to_gold'] else ''}")
 
     with open(OUT_PATH, "a") as handle:
         for row in results:
             handle.write(json.dumps(row) + "\n")
 
-    flips = sum(row["flipped_to_gold"] and row["condition"] == "donor" for row in results)
-    donor_rows = sum(row["condition"] == "donor" for row in results)
-    shuffle_flips = sum(row["flipped_to_gold"] and row["condition"] == "shuffle" for row in results)
-    shuffle_rows = sum(row["condition"] == "shuffle" for row in results)
-    print(f"\ndonor patches: {flips}/{donor_rows} flipped to gold")
-    if shuffle_rows:
-        print(f"shuffle controls: {shuffle_flips}/{shuffle_rows} flipped to gold")
+    print()
+    for condition in ("donor", "locked_donor", "shuffle"):
+        subset = [row for row in results if row["condition"] == condition]
+        if not subset:
+            continue
+        flips = sum(row["flipped_to_gold"] for row in subset)
+        print(f"{condition}: {flips}/{len(subset)} flipped to gold "
+              f"({flips / len(subset):.0%})")
+        for region in sorted({row["region"] for row in subset}):
+            rows_r = [row for row in subset if row["region"] == region]
+            flips_r = sum(row["flipped_to_gold"] for row in rows_r)
+            print(f"    {region}: {flips_r}/{len(rows_r)}")
     print(f"Wrote {len(results)} rows to {OUT_PATH}")
 
 
