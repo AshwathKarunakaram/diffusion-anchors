@@ -1,15 +1,16 @@
-# Pod pin: RunPod A100 80GB, driver is CUDA 12.4. Plain `pip install torch`
-# grabs a cu13 build that fails with "NVIDIA driver is too old" -- this exact
-# pin is what worked (see CONTEXT.md "Environment").
---extra-index-url https://download.pytorch.org/whl/cu124
-torch==2.6.0
-torchvision==0.21.0
-
-# DiffusionGemma was added in transformers v5.11.0 (confirmed via the
-# official model doc, 2026-08-14) -- anything older is missing the class
-# entirely, not just an outdated API.
+# DiffusionGemma was added in transformers v5.11.0; anything older is missing
+# the model class entirely, not merely an outdated API.
 transformers>=5.11.0
+
+# torch is intentionally unpinned here: install the build that matches your
+# host driver. Colab already ships a working torch/torchvision pair, so the
+# notebook installs nothing torch-related and only removes torchaudio, which
+# is unused and is the usual source of import-chain breakage.
+# On a self-managed CUDA 12.4 host the pinned pair that worked was:
+#   pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
+#       torch==2.6.0 torchvision==0.21.0
+torch
 accelerate
 datasets
-anthropic
+numpy
 matplotlib

@@ -272,7 +272,8 @@ def run_denoising(
 if __name__ == "__main__":
     import sys
 
-    from model_utils import build_inputs, load_model, CanvasRecorder
+    from lockin_prompts import PROMPTS
+    from model_utils import build_chat_inputs, load_model, CanvasRecorder
 
     print("=== Gate 1 parity check: HF generate() vs custom_denoise.run_denoising ===")
     try:
@@ -288,9 +289,8 @@ if __name__ == "__main__":
           "warn_only=True lets it run anyway; any divergence found below may be this, not our loop.")
 
     model, processor = load_model()
-    question = ("Natalia sold clips to 48 friends and then half as "
-                "many again. How many clips did she sell in total?")
-    inputs = build_inputs(processor, question, model.device)
+    prompt = PROMPTS[0]
+    inputs = build_chat_inputs(processor, prompt.prompt, model.device)
     SEED = 0
 
     # --- run A: stock HF generate() ---

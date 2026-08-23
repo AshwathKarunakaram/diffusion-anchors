@@ -44,15 +44,16 @@ import torch
 from capture_lens import answer_span_and_targets, select_runs, CORRECT_LABELS, LOCKED_LABELS
 from custom_denoise import run_denoising
 from lockin_answers import extract_answer
+from config import SELF_CONDITIONING_PATH
 from lockin_prompts import PROMPTS
-from model_utils import build_chat_inputs, load_model
+from model_utils import build_chat_inputs, get_module, load_model
 
 OUT_PATH = "results/steer_lockin.jsonl"
 DIR_DIR = "data/steer_directions"
 
 
 def sc_module(model):
-    return model.model.decoder.self_conditioning
+    return get_module(model, SELF_CONDITIONING_PATH)
 
 
 def attach_capture(model, store):
@@ -109,9 +110,17 @@ def window_for(tokenizer, final_ids, gold_answer):
     return tuple(targets["window"]) if targets else None
 
 
-def build_direction(model, tokenizer, inputs, rows, step_k, gold_answer):
-    """Mean self-conditioning hidden over the answer window, per group."""
-    vectors = {"donor": [], "locked": []}
+def build_direction(model, tokenizer, inputs, rows, step_k, gold_answer, mode="pooled"):
+    """Difference of group means in the self-conditioning hidden space.
+
+    mode="pooled"  -> one (d,) vector: the window is averaged away first, so
+                      this asks whether a SINGLE direction carries the fate.
+    mode="perpos"  -> an (L, d) tensor keeping per-position structure, where L
+                      is the shortest answer window across runs and positions
+                      are aligned to the window start. Strictly more
+                      expressive; closer to what the full transplant moves.
+    """
+    slices = {"donor": [], "locked": []}
     for row in rows:
         store = []
         final_ids, answer, n_steps, _ = replay(
@@ -127,19 +136,26 @@ def build_direction(model, tokenizer, inputs, rows, step_k, gold_answer):
             print(f"    seed={row['seed']}: no answer window, excluded")
             continue
         start, end = window
-        pooled = store[step_k][start:end].mean(dim=0)  # (d,)
         group = "donor" if row["trajectory_label"] in CORRECT_LABELS else "locked"
-        vectors[group].append(pooled)
-    if not vectors["donor"] or not vectors["locked"]:
+        slices[group].append(store[step_k][start:end])  # (win_len, d)
+    if not slices["donor"] or not slices["locked"]:
         return None
-    mean_correct = torch.stack(vectors["donor"]).mean(dim=0)
-    mean_locked = torch.stack(vectors["locked"]).mean(dim=0)
+
+    if mode == "pooled":
+        stacks = {g: torch.stack([s.mean(dim=0) for s in v]) for g, v in slices.items()}
+        length = None
+    else:
+        length = min(s.shape[0] for v in slices.values() for s in v)
+        stacks = {g: torch.stack([s[:length] for s in v]) for g, v in slices.items()}
+    mean_correct = stacks["donor"].mean(dim=0)
+    mean_locked = stacks["locked"].mean(dim=0)
     return {
         "v": mean_correct - mean_locked,
+        "length": length,
         "mean_correct_norm": float(mean_correct.norm()),
         "mean_locked_norm": float(mean_locked.norm()),
-        "n_correct": len(vectors["donor"]),
-        "n_locked": len(vectors["locked"]),
+        "n_correct": len(slices["donor"]),
+        "n_locked": len(slices["locked"]),
     }
 
 
@@ -151,7 +167,9 @@ def main():
                         choices=[prompt.name for prompt in PROMPTS],
                         help="build the direction on this prompt, steer the other one")
     parser.add_argument("--step", type=int, default=1)
-    parser.add_argument("--alphas", default="0.5,1,2,4")
+    parser.add_argument("--alphas", default="1,2,4,8,16")
+    parser.add_argument("--mode", choices=("pooled", "perpos"), default="perpos",
+                        help="pooled = one direction; perpos keeps per-position structure")
     parser.add_argument("--max-per-label", type=int, default=8)
     parser.add_argument("--skip-induce", action="store_true")
     parser.add_argument("--smoke", action="store_true",
@@ -186,17 +204,17 @@ def main():
     source_rows = select_runs(source_name, args.max_per_label)
     source_inputs = (inputs if source_name == args.prompt
                      else build_chat_inputs(processor, source_prompt.prompt, model.device))
-    print(f"building direction on {source_name} at step {args.step} "
+    print(f"building {args.mode} direction on {source_name} at step {args.step} "
           f"from {len(source_rows)} runs...")
     direction = build_direction(model, tokenizer, source_inputs, source_rows,
-                                args.step, source_rows[0]["gold_answer"])
+                                args.step, source_rows[0]["gold_answer"], mode=args.mode)
     if direction is None:
         raise SystemExit("could not build a direction: need both groups represented")
     v = direction["v"]
     print(f"  direction from {direction['n_correct']} correcting / "
           f"{direction['n_locked']} locked runs; ||v||={v.norm():.3f}, "
           f"||mean_correct||={direction['mean_correct_norm']:.3f}")
-    np.save(os.path.join(DIR_DIR, f"v_{source_name}_step{args.step}.npy"),
+    np.save(os.path.join(DIR_DIR, f"v_{source_name}_step{args.step}_{args.mode}.npy"),
             v.numpy())
 
     generator = torch.Generator().manual_seed(0)
@@ -218,6 +236,13 @@ def main():
         window = window_for(tokenizer, final_ids, row["gold_answer"])
         if window is None or args.step >= n_steps:
             return
+        if args.mode == "perpos":
+            # delta is (L, d); patch exactly L positions from the window start.
+            length = delta_base.shape[0]
+            if window[1] - window[0] < length:
+                print(f"  seed={row['seed']}: window shorter than direction, skipping")
+                return
+            window = (window[0], window[0] + length)
         for alpha in alphas:
             delta = sign * alpha * delta_base
             _, answer, steps_run, state = replay(
@@ -228,6 +253,7 @@ def main():
             record = {
                 "prompt_name": args.prompt,
                 "direction_from": source_name,
+                "mode": args.mode,
                 "seed": row["seed"],
                 "label": row["trajectory_label"],
                 "condition": condition,

@@ -32,10 +32,10 @@ import os
 import numpy as np
 import torch
 
-from config import CANVAS_LENGTH
+from config import CANVAS_LENGTH, DECODER_LAYERS_PATH, DECODER_NORM_PATH
 from custom_denoise import run_denoising
 from lockin_answers import extract_answer
-from model_utils import build_chat_inputs, find_first_token_span, load_model
+from model_utils import build_chat_inputs, find_first_token_span, get_module, load_model
 from lockin_prompts import PROMPTS
 
 RESULT_PATH = "results/lockin_sweep.jsonl"
@@ -69,7 +69,7 @@ def select_runs(prompt_name: str, max_per_label: int):
 def attach_layer_hooks(model):
     """Store each decoder layer's output hidden states, per forward call."""
     captures = []  # captures[call_index][layer_index] = (256, d) fp16 cpu
-    layers = model.model.decoder.layers
+    layers = get_module(model, DECODER_LAYERS_PATH)
     current = {}
 
     def make_hook(layer_index):
@@ -136,9 +136,9 @@ def answer_span_and_targets(tokenizer, final_ids, gold_answer):
 @torch.no_grad()
 def lens_reduce(model, captures, steps, final_ids, targets, device):
     """Project every (layer, step) hidden through norm + lm_head; reduce."""
-    norm = model.model.decoder.norm
+    norm = get_module(model, DECODER_NORM_PATH)
     lm_head = model.lm_head
-    n_layers = len(model.model.decoder.layers)
+    n_layers = len(get_module(model, DECODER_LAYERS_PATH))
     n_steps = len(steps)
 
     # Align hook calls to denoising steps from the END (any warm-up decoder

@@ -1,21 +1,32 @@
 """Causal test: patch a correcting run's self-conditioning into a locked run.
 
-Generalizes patch_squares.py from one hand-picked squares pair to any
-lock-in sweep family. Donors are possible_corrector runs, recipients are
-possible_locked_wrong runs (both from results/lockin_sweep.jsonl). At a
-chosen denoising step k, the recipient's self-conditioning logits S are
-replaced by the donor's (answer window only, or the whole canvas) and
-denoising continues. Success = the recipient's final answer flips to gold.
+Donors are possible_corrector runs, recipients are possible_locked_wrong runs
+(both read from results/lockin_sweep.jsonl). At a chosen denoising step k the
+recipient's self-conditioning logits S are replaced by the donor's -- over the
+answer window, everything outside it, or the whole canvas -- and denoising
+continues. Success = the recipient's final answer flips to gold.
 
-Conditions per (recipient, step, region):
-  * noop    -- plain replay (must reproduce the locked answer, or the pair
-               is discarded as nondeterministic);
-  * donor   -- the real patch;
-  * shuffle -- donor S with the patched positions randomly permuted
-               (controls for "any perturbation frees the lock").
+Conditions per (recipient, donor, step, region):
+  * noop         -- plain replay, run before every patch. It must reproduce
+                    the recipient's locked answer or the run is discarded as
+                    nondeterministic rather than silently counted.
+  * donor        -- the real patch, from a corrector.
+  * shuffle      -- donor S with the patched positions randomly permuted.
+                    Controls for "any perturbation frees the lock", but note
+                    it only discriminates when the prompt's natural correct
+                    rate is well below 1: on an easy family a shuffle is just
+                    a reroll and lands at the natural rate.
+  * locked_donor -- S from a DIFFERENT locked run. This is the control the
+                    shuffle cannot provide: coherent state that is not
+                    correcting state. If it rescues as well as a corrector,
+                    the result reduces to "any coherent S resets the run".
+
+Read every arm against the family's natural correct rate (analyze_patch.py
+prints it), never against zero.
 
 Run:
-    python src/patch_lockin.py --prompt two_aces_hand --steps 1,2,4,6
+    python src/patch_lockin.py --prompt two_aces_hand --steps 1,2 \
+        --n-donors 3 --locked-donor
 """
 
 import argparse
@@ -60,25 +71,48 @@ def capture_s_at(step_k: int, store: dict):
     return fn
 
 
-def make_patch(step_k: int, donor_S, window, shuffle: bool, seed: int):
-    """Replace S at step k inside [window[0], window[1]) (None = full canvas)."""
+def region_slices(window, canvas_len, region: str):
+    """Position ranges the patch may write.
+
+    answer     -- the answer window only
+    not_answer -- everything EXCEPT the answer window (does the fate live
+                  outside the answer positions?)
+    all        -- the whole canvas
+    """
+    if region == "all":
+        return [(0, canvas_len)]
+    if window is None:
+        return []
+    start, end = window
+    if region == "answer":
+        return [(start, end)]
+    if region == "not_answer":
+        return [span for span in ((0, start), (end, canvas_len)) if span[1] > span[0]]
+    raise ValueError(f"unknown region: {region}")
+
+
+def make_patch(step_k: int, donor_S, window, region: str, shuffle: bool, seed: int):
+    """Replace S at step k inside the region's position ranges."""
     call = {"i": -1, "fired": False}
 
     def fn(state):
         call["i"] += 1
         if call["i"] != step_k:
             return None
-        call["fired"] = True
         S = state["self_conditioning_logits"].clone()
         donor = donor_S.to(S.device, S.dtype)
-        start, end = (0, S.shape[1]) if window is None else window
-        patch = donor[:, start:end, :]
-        if shuffle:
-            generator = random.Random(seed)
-            order = list(range(end - start))
-            generator.shuffle(order)
-            patch = patch[:, order, :]
-        S[:, start:end, :] = patch
+        spans = region_slices(window, S.shape[1], region)
+        if not spans:
+            return None
+        generator = random.Random(seed)
+        for start, end in spans:
+            patch = donor[:, start:end, :]
+            if shuffle:
+                order = list(range(end - start))
+                generator.shuffle(order)
+                patch = patch[:, order, :]
+            S[:, start:end, :] = patch
+        call["fired"] = True
         return {"self_conditioning_logits": S}
 
     fn.state = call
@@ -91,7 +125,8 @@ def main():
                         choices=[prompt.name for prompt in PROMPTS], default=None)
     parser.add_argument("--steps", type=str, default="1,2,4,6",
                         help="comma-separated step indices at which to patch")
-    parser.add_argument("--regions", type=str, default="answer,all")
+    parser.add_argument("--regions", type=str, default="answer,all",
+                        help="comma-separated: answer, not_answer, all")
     parser.add_argument("--max-per-label", type=int, default=12)
     parser.add_argument("--skip-shuffle", action="store_true")
     parser.add_argument("--n-donors", type=int, default=1,
@@ -164,14 +199,13 @@ def main():
                 if step_k >= n_steps or donor_seed == seed:
                     continue  # a run cannot donate to itself
                 for region in regions:
-                    region_window = window if region == "answer" else None
-                    if region == "answer" and window is None:
+                    if region != "all" and window is None:
                         continue
                     conditions = [kind]
                     if kind == "donor" and not args.skip_shuffle:
                         conditions.append("shuffle")
                     for condition in conditions:
-                        patch = make_patch(step_k, S, region_window,
+                        patch = make_patch(step_k, S, window, region,
                                            shuffle=(condition == "shuffle"), seed=seed)
                         _, patched_answer, patched_steps = replay(
                             model, tokenizer, inputs, seed, patch)
