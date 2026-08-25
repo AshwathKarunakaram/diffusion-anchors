@@ -4,19 +4,27 @@ every intermediate canvas to disk.
 Run inside tmux:  python src/generate_trajectories.py
 
 Output: data/trajectories/problem_{i:04d}.json with
-  question, gold_answer, prompt_token_ids,
+  question, gold_answer, prompt_token_ids, seed,
   steps: [{step, token_ids, text}], final_text
 All downstream analysis runs on these files with NO GPU.
+
+`seed` is recorded (and set right before the `generate()` call) so
+`intervene_swap.py` can reseed identically and replay this exact trajectory
+up to an injection step before editing it live -- see custom_denoise.py and
+intervene_swap.py for why that matters. `disable_compile=True` matches what
+the replay uses too, keeping both runs on the same eager decoder path.
 """
 
+import argparse
 import json
 import os
 import re
+import time
 
 import torch
 from datasets import load_dataset
 
-from config import N_PROBLEMS, MAX_SOLUTION_CHARS, TRAJ_DIR, CANVAS_LENGTH, MAX_DENOISING_STEPS
+from config import N_PROBLEMS, MAX_SOLUTION_CHARS, TRAJ_DIR, CANVAS_LENGTH, USER_SUFFIX
 from model_utils import load_model, CanvasRecorder, build_inputs
 
 
@@ -25,27 +33,56 @@ def gold_answer(sol: str) -> str:
     return m.group(1).replace(",", "") if m else ""
 
 
-def select_problems():
+def select_problems(n_problems: int, offset: int):
     ds = load_dataset("openai/gsm8k", "main", split="test")
     picked = []
+    need = n_problems + offset
     for ex in ds:
         if len(ex["answer"]) <= MAX_SOLUTION_CHARS:
             picked.append({"question": ex["question"], "gold": gold_answer(ex["answer"])})
-        if len(picked) >= N_PROBLEMS:
+        if len(picked) >= need:
             break
-    return picked
+    return picked[offset:offset + n_problems]
 
 
 def main():
-    os.makedirs(TRAJ_DIR, exist_ok=True)
-    model, processor = load_model()
-    problems = select_problems()
-    print(f"Selected {len(problems)} short GSM8K problems")
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--n-problems",
+        type=int,
+        default=N_PROBLEMS,
+        help=f"how many GSM8K problems to generate (default: {N_PROBLEMS})",
+    )
+    parser.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="skip this many matching test items first (pilot 0-9 used offset=0)",
+    )
+    args = parser.parse_args()
 
-    for i, prob in enumerate(problems):
+    os.makedirs(TRAJ_DIR, exist_ok=True)
+    print("Loading model...")
+    t_load = time.time()
+    model, processor = load_model()
+    print(f"Model loaded ({time.time() - t_load:.0f}s).")
+    problems = select_problems(args.n_problems, args.offset)
+    print(f"Selected {len(problems)} GSM8K problems "
+          f"(offset={args.offset}). Starting generation.\n")
+
+    t_run_start = time.time()
+    for j, prob in enumerate(problems):
+        i = args.offset + j
         out_path = os.path.join(TRAJ_DIR, f"problem_{i:04d}.json")
         if os.path.exists(out_path):
+            print(f"[{j+1}/{len(problems)}] idx={i:04d} already cached, skipping")
             continue
+
+        t0 = time.time()
+        seed = i
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
         inputs = build_inputs(processor, prob["question"], model.device)
         rec = CanvasRecorder(tokenizer=processor.tokenizer)
@@ -55,8 +92,7 @@ def main():
                 **inputs,
                 max_new_tokens=CANVAS_LENGTH,
                 streamer=rec,
-                # T=0-style determinism if supported; VERIFY sampler config
-                # options in DiffusionGemmaGenerationConfig on the pod.
+                disable_compile=True,  # matches the eager path intervene_swap.py's replay uses
             )
 
         steps = [
@@ -73,11 +109,18 @@ def main():
                 "question": prob["question"],
                 "gold_answer": prob["gold"],
                 "prompt_len": int(inputs["input_ids"].shape[1]),
+                "seed": seed,
+                "user_suffix": USER_SUFFIX,
                 "n_steps": len(steps),
                 "steps": steps,
                 "final_text": final_text,
             }, f)
-        print(f"[{i:04d}] steps={len(steps)} final={final_text[-60:]!r}")
+        elapsed = time.time() - t0
+        done = j + 1
+        avg = (time.time() - t_run_start) / done
+        eta_min = avg * (len(problems) - done) / 60
+        print(f"[{done}/{len(problems)}] idx={i:04d} steps={len(steps)} ({elapsed:.1f}s, "
+              f"ETA {eta_min:.0f}m) final={final_text[-80:]!r}")
 
 
 if __name__ == "__main__":
