@@ -65,7 +65,19 @@ def natural_rates(sweep_rows):
     return {name: hits / total for name, (hits, total) in stats.items() if total}
 
 
+def fired_only(rows):
+    """Drop rows whose patch never actually fired.
+
+    make_patch is a no-op when the requested step index is past the end of a
+    run or the region resolves to no positions. Those rows carry an unpatched
+    outcome, so counting them as failed rescues would silently deflate every
+    rate. They are reported separately instead.
+    """
+    return [row for row in rows if row.get("fired", True)]
+
+
 def rate(rows):
+    rows = fired_only(rows)
     if not rows:
         return None
     return sum(row["flipped_to_gold"] for row in rows) / len(rows)
@@ -78,9 +90,9 @@ def plot_pnr(prompt, rows, natural, path):
     for region in regions:
         ys, xs = [], []
         for step in steps:
-            subset = [row for row in rows
-                      if row["condition"] == "donor" and row["region"] == region
-                      and row["step_k"] == step]
+            subset = fired_only([row for row in rows
+                                 if row["condition"] == "donor" and row["region"] == region
+                                 and row["step_k"] == step])
             if subset:
                 xs.append(step)
                 ys.append(rate(subset))
@@ -103,8 +115,8 @@ def plot_conditions(prompt, rows, natural, path):
     labels, values, counts = [], [], []
     for condition in CONDITION_ORDER:
         for region in REGION_ORDER:
-            subset = [row for row in rows
-                      if row["condition"] == condition and row["region"] == region]
+            subset = fired_only([row for row in rows
+                                 if row["condition"] == condition and row["region"] == region])
             if subset:
                 labels.append(f"{condition}\n{region}")
                 values.append(rate(subset))
@@ -150,7 +162,14 @@ def main():
         print("unpatched locked recipients are 0% by construction "
               "(noop replay is verified before every patch)")
 
-        entry = {"natural_rate": base, "conditions": {}, "by_step": {}}
+        skipped = len(rows) - len(fired_only(rows))
+        if skipped:
+            print(f"NOTE: {skipped} rows whose patch never fired are excluded "
+                  f"(unpatched outcome; counting them would deflate every rate)")
+        rows = fired_only(rows)
+
+        entry = {"natural_rate": base, "conditions": {}, "n_never_fired": skipped,
+                 "by_step": {}}
         for condition in CONDITION_ORDER:
             subset = [row for row in rows if row["condition"] == condition]
             if not subset:
@@ -158,6 +177,12 @@ def main():
             hits = sum(row["flipped_to_gold"] for row in subset)
             print(f"\n{condition}: {hits}/{len(subset)} ({hits / len(subset):.0%})")
             entry["conditions"][condition] = {"hits": hits, "n": len(subset)}
+            deltas = [row["relative_delta"] for row in subset
+                      if row.get("relative_delta") is not None]
+            if deltas:
+                mean_delta = sum(deltas) / len(deltas)
+                print(f"    mean relative change to S: {mean_delta:.3f}")
+                entry["conditions"][condition]["mean_relative_delta"] = mean_delta
             for region in REGION_ORDER:
                 region_rows = [row for row in subset if row["region"] == region]
                 if region_rows:
@@ -204,6 +229,9 @@ def main():
     with open(SUMMARY_PATH, "w") as handle:
         json.dump(summary, handle, indent=2)
     print(f"\nwrote plots to {PLOT_DIR}/ and summary to {SUMMARY_PATH}")
+    print("\nCheck the mean relative change per condition before reading the "
+          "rates: if locked_donor edits S much less than donor does, part of "
+          "its lower rescue rate is edit size rather than edit content.")
 
 
 if __name__ == "__main__":

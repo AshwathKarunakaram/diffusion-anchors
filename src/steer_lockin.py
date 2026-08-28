@@ -105,6 +105,28 @@ def replay(model, tokenizer, inputs, seed, capture_store=None, steer=None):
     return final[0].tolist(), extract_answer(text), len(steps), state
 
 
+def sc_offset(n_calls: int, n_steps: int) -> int:
+    """Self-conditioning calls minus denoising steps.
+
+    The module fires once per decoder forward. patch_lockin.py indexes steps
+    by its intervention callback, which is definitionally one call per
+    denoising step. If the model ever runs a warm-up forward before the loop,
+    call index k here would NOT be step k there, and the same --step value
+    would silently mean different things in the two experiments. Aligning
+    from the end keeps them comparable.
+    """
+    return max(0, n_calls - n_steps)
+
+
+def measure_sc_offset(model, tokenizer, inputs, seed):
+    store = []
+    _, _, n_steps, _ = replay(model, tokenizer, inputs, seed, capture_store=store)
+    offset = sc_offset(len(store), n_steps)
+    print(f"self-conditioning calls={len(store)} denoising steps={n_steps} "
+          f"-> step offset {offset}")
+    return offset
+
+
 def window_for(tokenizer, final_ids, gold_answer):
     targets = answer_span_and_targets(tokenizer, final_ids, gold_answer)
     return tuple(targets["window"]) if targets else None
@@ -137,7 +159,8 @@ def build_direction(model, tokenizer, inputs, rows, step_k, gold_answer, mode="p
             continue
         start, end = window
         group = "donor" if row["trajectory_label"] in CORRECT_LABELS else "locked"
-        slices[group].append(store[step_k][start:end])  # (win_len, d)
+        index = sc_offset(len(store), n_steps) + step_k
+        slices[group].append(store[index][start:end])  # (win_len, d)
     if not slices["donor"] or not slices["locked"]:
         return None
 
@@ -198,6 +221,9 @@ def main():
         print("calls should equal steps (or steps+1); hidden should be (256, 2816)")
         return
 
+    probe_rows = select_runs(args.prompt, 1)
+    offset = measure_sc_offset(model, tokenizer, inputs, probe_rows[0]["seed"])
+
     # --- build the direction -------------------------------------------------
     source_name = args.direction_from or args.prompt
     source_prompt = prompt_by_name[source_name]
@@ -247,7 +273,7 @@ def main():
             delta = sign * alpha * delta_base
             _, answer, steps_run, state = replay(
                 model, tokenizer, inputs, row["seed"],
-                steer=(args.step, delta, window))
+                steer=(offset + args.step, delta, window))
             flipped = answer == row["gold_answer"]
             locked_in = (answer is not None and answer != row["gold_answer"])
             record = {
@@ -259,6 +285,7 @@ def main():
                 "condition": condition,
                 "alpha": alpha,
                 "step_k": args.step,
+                "sc_offset": offset,
                 "fired": state["fired"],
                 "noop_answer": noop_answer,
                 "steered_answer": answer,

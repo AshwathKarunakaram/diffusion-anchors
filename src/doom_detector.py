@@ -79,10 +79,14 @@ def capture(prompt_names, step_k, max_per_label):
             if answer != row["final_answer"]:
                 print(f"  seed={row['seed']}: replay mismatch, excluded")
                 continue
-            if len(store) <= step_k:
+            # Align call index to denoising step (see steer_lockin.sc_offset):
+            # a warm-up decoder forward would otherwise shift every feature by
+            # one step relative to the patching experiments.
+            index = max(0, len(store) - len(steps)) + step_k
+            if index >= len(store):
                 print(f"  seed={row['seed']}: only {len(store)} sc calls, excluded")
                 continue
-            hidden = store[step_k].numpy()  # (256, d)
+            hidden = store[index].numpy()  # (256, d)
             canvas_features.append(hidden.mean(axis=0))
             window_features.append(hidden[FIXED_WINDOW[0]:FIXED_WINDOW[1]].mean(axis=0))
             labels.append(int(row["trajectory_label"] in LOCKED_LABELS))

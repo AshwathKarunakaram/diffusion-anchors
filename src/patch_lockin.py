@@ -105,14 +105,25 @@ def make_patch(step_k: int, donor_S, window, region: str, shuffle: bool, seed: i
         if not spans:
             return None
         generator = random.Random(seed)
+        delta_sq, base_sq = 0.0, 0.0
         for start, end in spans:
             patch = donor[:, start:end, :]
             if shuffle:
                 order = list(range(end - start))
                 generator.shuffle(order)
                 patch = patch[:, order, :]
+            original = S[:, start:end, :]
+            # How far this patch actually moves the state. A locked donor's S
+            # resembles a locked recipient's more than a corrector's does, so
+            # "locked_donor rescues less" could otherwise be explained by it
+            # simply being a smaller edit. Logging the magnitude lets the
+            # analysis check that rather than assume it.
+            delta_sq += float((patch.float() - original.float()).pow(2).sum())
+            base_sq += float(original.float().pow(2).sum())
             S[:, start:end, :] = patch
         call["fired"] = True
+        call["delta_norm"] = delta_sq ** 0.5
+        call["relative_delta"] = (delta_sq / base_sq) ** 0.5 if base_sq > 0 else None
         return {"self_conditioning_logits": S}
 
     fn.state = call
@@ -217,6 +228,8 @@ def main():
                             "region": region,
                             "condition": condition,
                             "fired": patch.state["fired"],
+                            "delta_norm": patch.state.get("delta_norm"),
+                            "relative_delta": patch.state.get("relative_delta"),
                             "noop_answer": noop_answer,
                             "patched_answer": patched_answer,
                             "gold_answer": recipient["gold_answer"],
@@ -224,6 +237,10 @@ def main():
                             "n_steps": patched_steps,
                         }
                         results.append(row)
+                        if not row["fired"]:
+                            print(f"  WARNING seed={seed} k={step_k} {region}: patch "
+                                  f"never fired (step past end, or empty region); "
+                                  f"this row is excluded from rates")
                         print(f"  seed={seed} <- d{donor_seed} k={step_k} "
                               f"{region}/{condition}: {noop_answer} -> {patched_answer} "
                               f"{'FLIPPED' if row['flipped_to_gold'] else ''}")
