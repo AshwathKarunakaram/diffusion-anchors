@@ -214,6 +214,8 @@ def main():
     parser.add_argument("--max-per-label", type=int, default=12)
     parser.add_argument("--smoke", action="store_true",
                         help="capture a single locked run and print sanity info")
+    parser.add_argument("--resume", action="store_true",
+                        help="skip runs already captured in data/lens_capture/")
     args = parser.parse_args()
     prompt_names = args.prompt or ["two_aces_hand"]
     prompt_by_name = {prompt.name: prompt for prompt in PROMPTS}
@@ -235,6 +237,10 @@ def main():
 
         for row in rows:
             seed = row["seed"]
+            stem_existing = os.path.join(OUT_DIR, f"{prompt_name}_seed_{seed:04d}")
+            if args.resume and os.path.exists(stem_existing + ".npz"):
+                print(f"  {prompt_name} seed={seed}: cached, skipping")
+                continue
             captures, handles = attach_layer_hooks(model)
             s_records = []
             try:

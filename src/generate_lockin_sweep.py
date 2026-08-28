@@ -55,6 +55,10 @@ def main():
         help="restrict to these prompts (repeatable); default is all prompts",
     )
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--resume", action="store_true",
+                        help="skip (prompt, seed) pairs already cached in "
+                             "data/lockin_sweep/. Use this after a Colab "
+                             "disconnect: finished runs are not repeated.")
     args = parser.parse_args()
 
     if CANVAS_LENGTH != 256:
@@ -75,9 +79,14 @@ def main():
     tokenizer = processor.tokenizer
     rows = []
 
+    skipped = 0
     for prompt in prompts:
         inputs = build_chat_inputs(processor, prompt.prompt, model.device)
         for seed in range(args.start_seed, args.start_seed + args.n_seeds):
+            cached = os.path.join(DATA_DIR, f"{prompt.name}_seed_{seed:04d}.json")
+            if args.resume and os.path.exists(cached):
+                skipped += 1
+                continue
             final, steps = run_denoising(
                 model,
                 inputs["input_ids"],
@@ -110,6 +119,11 @@ def main():
                 f"steps={len(steps)} {label}"
             )
 
+    if skipped:
+        print(f"\nskipped {skipped} already-cached runs (--resume)")
+    if not rows:
+        print("nothing new to run; relabel rebuilds the JSONL from the cache")
+        return
     summary = summarize(rows)
     with open(RESULT_PATH, "a") as handle:
         for row in rows:
