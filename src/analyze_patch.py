@@ -191,26 +191,55 @@ def main():
                     entry["conditions"][condition][region] = {
                         "hits": region_hits, "n": len(region_rows)}
 
-        # Exact tests between every pair of conditions that has data.
+        # Exact tests, computed WITHIN each region.
+        #
+        # Pooling conditions across regions is not a fair comparison: the arms
+        # do not have the same region composition (only donor is usually run
+        # on not_answer, and not_answer rescues poorly), so a pooled donor
+        # number is dragged down by rows the control arms never had. Compare
+        # like with like, and refuse to pool when the mixes differ.
         print()
+        entry["tests"] = {}
+        for region in REGION_ORDER:
+            region_rows = [row for row in rows if row["region"] == region]
+            if not region_rows:
+                continue
+            for i, first in enumerate(CONDITION_ORDER):
+                for second in CONDITION_ORDER[i + 1:]:
+                    one = [row for row in region_rows if row["condition"] == first]
+                    two = [row for row in region_rows if row["condition"] == second]
+                    if not one or not two:
+                        continue
+                    a = sum(r["flipped_to_gold"] for r in one)
+                    b = len(one) - a
+                    c = sum(r["flipped_to_gold"] for r in two)
+                    d = len(two) - c
+                    p = fisher_two_sided(a, b, c, d)
+                    print(f"[{region}] {first} {a}/{a + b} vs {second} {c}/{c + d}: "
+                          f"p = {p:.3e}")
+                    entry["tests"][f"{region}::{first}_vs_{second}"] = p
+                    if base is not None:
+                        for name, hits, total in ((first, a, a + b), (second, c, c + d)):
+                            if abs(hits / total - base) < 0.05:
+                                print(f"    note: {name} sits at the natural rate "
+                                      f"-- this arm has no discriminating power here")
+
+        # Flag any condition pair whose region mixes differ, so a pooled
+        # number is never quoted by accident.
+        mixes = {}
+        for condition in CONDITION_ORDER:
+            subset = [row for row in rows if row["condition"] == condition]
+            if subset:
+                mixes[condition] = {r for r in REGION_ORDER
+                                    if any(row["region"] == r for row in subset)}
         for i, first in enumerate(CONDITION_ORDER):
             for second in CONDITION_ORDER[i + 1:]:
-                one = [row for row in rows if row["condition"] == first]
-                two = [row for row in rows if row["condition"] == second]
-                if not one or not two:
-                    continue
-                a, b = sum(r["flipped_to_gold"] for r in one), 0
-                b = len(one) - a
-                c = sum(r["flipped_to_gold"] for r in two)
-                d = len(two) - c
-                p = fisher_two_sided(a, b, c, d)
-                print(f"{first} {a}/{a + b} vs {second} {c}/{c + d}: p = {p:.3e}")
-                entry.setdefault("tests", {})[f"{first}_vs_{second}"] = p
-                if base is not None:
-                    for name, hits, total in ((first, a, a + b), (second, c, c + d)):
-                        if abs(hits / total - base) < 0.05:
-                            print(f"    note: {name} sits at the natural rate "
-                                  f"-- this arm has no discriminating power here")
+                if first in mixes and second in mixes and mixes[first] != mixes[second]:
+                    print(f"WARNING: {first} covers regions {sorted(mixes[first])} but "
+                          f"{second} covers {sorted(mixes[second])}. Do NOT quote a "
+                          f"pooled {first}-vs-{second} number; use the per-region "
+                          f"tests above.")
+                    entry.setdefault("unpooled_pairs", []).append(f"{first}_vs_{second}")
 
         for step in sorted({row["step_k"] for row in rows}):
             donor_rows = [row for row in rows

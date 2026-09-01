@@ -29,14 +29,10 @@ import json
 import os
 
 import numpy as np
-import torch
 
-from capture_lens import select_runs, LOCKED_LABELS
-from config import DECODER_LAYERS_PATH
-from custom_denoise import run_denoising
-from lockin_answers import extract_answer
-from lockin_prompts import PROMPTS
-from model_utils import build_chat_inputs, get_module, load_model
+# torch and the project modules are imported inside the functions that need
+# them: --report-only re-reads a saved JSON and must work on a CPU box with
+# no transformers install.
 
 OUT_PATH = "results/routing_divergence.json"
 WINDOW = (0, 24)
@@ -48,6 +44,8 @@ def parse_router_output(output):
     Handles the shapes routers commonly return: a bare logits tensor, or a
     tuple whose first 3-D/2-D member is the logits.
     """
+    import torch
+
     candidates = output if isinstance(output, tuple) else (output,)
     for item in candidates:
         if not isinstance(item, torch.Tensor) or item.dtype in (torch.int32, torch.int64):
@@ -62,6 +60,9 @@ def parse_router_output(output):
 
 def attach_router_hooks(model, store):
     """store[layer_index] gets one entry per router call."""
+    from config import DECODER_LAYERS_PATH
+    from model_utils import get_module
+
     layers = get_module(model, DECODER_LAYERS_PATH)
     handles = []
 
@@ -79,6 +80,48 @@ def attach_router_hooks(model, store):
     return handles, len(layers)
 
 
+MIN_MEANINGFUL_JS = 1e-3
+
+
+def is_meaningful(between: float, within: float) -> bool:
+    """Whether a between-group divergence is real signal.
+
+    A bare `between > 2 * within` test passes spuriously when the within-group
+    baseline is exactly 0.0: any float dust (or a negative zero) then clears
+    the bar. Require the value to also exceed an absolute floor, so a genuine
+    null reads as a null instead of lighting up a third of the layers.
+    """
+    return between > MIN_MEANINGFUL_JS and between > 2 * within
+
+
+def report(path: str = OUT_PATH):
+    """Print the verdict from a saved routing_divergence.json. No GPU."""
+    with open(path) as handle:
+        data = json.load(handle)
+    layers = {int(k): v for k, v in data["layers"].items()}
+    if not layers:
+        print("no layers recorded")
+        return
+    hits = [(index, values) for index, values in sorted(layers.items())
+            if is_meaningful(values["between_group_js"], values["within_group_js"])]
+    strongest = max(layers.items(), key=lambda kv: kv[1]["between_group_js"])
+    print(f"prompt={data.get('prompt')} step={data.get('step')}  "
+          f"{len(layers)} layers analysed")
+    print(f"largest between-group JS: {strongest[1]['between_group_js']:.6f} "
+          f"at layer {strongest[0]} "
+          f"(within-group baseline there: {strongest[1]['within_group_js']:.6f})")
+    print(f"threshold: JS > {MIN_MEANINGFUL_JS} AND > 2x the within-group baseline")
+    if not hits:
+        print("\nNULL RESULT: no layer clears the threshold. Expert routing at "
+              "this step does not distinguish locked runs from correcting runs.")
+        return
+    print(f"\n{len(hits)} layer(s) clear it:")
+    for index, values in hits:
+        print(f"  layer {index:2d}: between={values['between_group_js']:.6f} "
+              f"within={values['within_group_js']:.6f} "
+              f"n={values['n_locked']}/{values['n_correct']}")
+
+
 def js_divergence(p, q):
     """Jensen-Shannon divergence between two distributions, base 2."""
     p = np.clip(p, 1e-12, None)
@@ -90,6 +133,10 @@ def js_divergence(p, q):
 
 
 def collect(model, tokenizer, inputs, rows, step_k, n_layers, smoke=False):
+    from capture_lens import LOCKED_LABELS
+    from custom_denoise import run_denoising
+    from lockin_answers import extract_answer
+
     groups = {"locked": {}, "correcting": {}}
     for row in rows:
         store = {}
@@ -140,12 +187,23 @@ def collect(model, tokenizer, inputs, rows, step_k, n_layers, smoke=False):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prompt", default="two_aces_hand",
-                        choices=[prompt.name for prompt in PROMPTS])
+    parser.add_argument("--prompt", default="two_aces_hand")
     parser.add_argument("--step", type=int, default=1)
     parser.add_argument("--max-per-label", type=int, default=10)
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--report-only", action="store_true",
+                        help="re-read results/routing_divergence.json and print "
+                             "the verdict; no model load, no GPU")
     args = parser.parse_args()
+
+    if args.report_only:
+        report()
+        return
+
+    from capture_lens import select_runs
+    from config import DECODER_LAYERS_PATH
+    from lockin_prompts import PROMPTS
+    from model_utils import build_chat_inputs, get_module, load_model
     prompt = {p.name: p for p in PROMPTS}[args.prompt]
 
     print("Loading DiffusionGemma for routing capture...")
@@ -162,7 +220,7 @@ def main():
         return
 
     rng = np.random.default_rng(0)
-    report = {"prompt": args.prompt, "step": args.step, "layers": {}}
+    summary = {"prompt": args.prompt, "step": args.step, "layers": {}}
     print(f"\nlayer  between-group JS   within-group baseline   n_locked/n_correct")
     for layer_index in range(n_layers):
         locked = groups["locked"].get(layer_index, [])
@@ -178,20 +236,20 @@ def main():
         half = len(pool) // 2
         within = js_divergence(pool[index[:half]].mean(0), pool[index[half:2 * half]].mean(0))
 
-        report["layers"][layer_index] = {
+        summary["layers"][layer_index] = {
             "between_group_js": between, "within_group_js": within,
             "n_locked": len(locked), "n_correct": len(correct),
         }
-        flag = "  <-- exceeds baseline" if between > within * 2 else ""
+        flag = "  <-- exceeds baseline" if is_meaningful(between, within) else ""
         print(f"{layer_index:5d}  {between:16.5f}   {within:20.5f}   "
               f"{len(locked)}/{len(correct)}{flag}")
 
     os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
     with open(OUT_PATH, "w") as handle:
-        json.dump(report, handle, indent=2)
+        json.dump(summary, handle, indent=2)
     print(f"\nwrote {OUT_PATH}")
-    print("A between-group value that does not clearly exceed the within-group "
-          "baseline is a null result: routing does not distinguish the groups.")
+    print()
+    report()
 
 
 if __name__ == "__main__":
